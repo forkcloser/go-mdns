@@ -103,8 +103,8 @@ type Link interface {
 	Family() Family
 	// Addrs is the interface's addresses of that family, each with the
 	// prefix it is on: what the host can be reached at on this link, and
-	// what tells a neighbour from a stranger. An IPv6 link-local address
-	// carries its zone.
+	// what tells a neighbour from a stranger. A prefix holds no zone:
+	// that of an IPv6 link-local address is the link's own interface.
 	Addrs() []netip.Prefix
 	// MTU is the largest IP packet the interface carries whole, headers
 	// included: what a message of more than one record has to fit in.
