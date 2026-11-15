@@ -1,0 +1,240 @@
+// Package engine is a host's part in Multicast DNS (RFC 6762), at the
+// level of records: it asks, remembers what it hears on each link for as
+// long as it was told to, and tells of it. Package mdns is written on
+// it, and says in its own words what this one does.
+//
+// Everything an Engine knows is one goroutine's, its loop's: what the
+// links hear, what a caller asks and every timer come to it one at a
+// time, so nothing in it is locked.
+package engine
+
+import (
+	"container/heap"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/netip"
+	"sync"
+	"time"
+
+	"github.com/forkcloser/go-mdns/internal/wire"
+	"github.com/forkcloser/go-mdns/transport"
+)
+
+// What can go wrong.
+var (
+	// ErrClosed is an Engine that is closed.
+	ErrClosed = errors.New("closed")
+	// ErrInvalid is a question or a record that cannot be said.
+	ErrInvalid = errors.New("not valid in Multicast DNS")
+)
+
+// Config is how an Engine is opened.
+type Config struct {
+	// Network is where the links are.
+	Network transport.Network
+	// Families is the families to speak. Zero is both.
+	Families transport.Family
+	// Interfaces says which interfaces to be on. Nil is all of them.
+	Interfaces func(transport.Interface) bool
+}
+
+// Engine is a host on its links.
+type Engine struct {
+	cfg  Config
+	stop context.CancelFunc
+	// done is closed when the loop has ended.
+	done    chan struct{}
+	calls   chan func()
+	events  chan transport.Event
+	packets chan arrival
+	// running is the watch and the readers.
+	running sync.WaitGroup
+	closing sync.Once
+
+	// What follows is the loop's.
+	now    time.Time
+	timers timers
+	links  map[transport.Link]*link
+	asked  map[askKey]*asking
+	named  map[string][]*asking
+	sweep  *timer
+}
+
+// arrival is a message read from a link.
+type arrival struct {
+	link    transport.Link
+	message wire.Message
+	from    netip.AddrPort
+	group   bool
+}
+
+// Open starts an Engine on a network. It ends with Close, and not with
+// ctx, which is only what its goroutines inherit.
+func Open(ctx context.Context, cfg Config) (*Engine, error) {
+	if cfg.Network == nil {
+		return nil, fmt.Errorf("%w: no network to be on", ErrInvalid)
+	}
+
+	ctx, stop := context.WithCancel(context.WithoutCancel(ctx))
+	opened := &Engine{
+		cfg:     cfg,
+		stop:    stop,
+		done:    make(chan struct{}),
+		calls:   make(chan func()),
+		events:  make(chan transport.Event),
+		packets: make(chan arrival),
+		links:   map[transport.Link]*link{},
+		asked:   map[askKey]*asking{},
+		named:   map[string][]*asking{},
+	}
+
+	opened.running.Go(func() {
+		err := cfg.Network.Watch(ctx, func(event transport.Event) {
+			select {
+			case opened.events <- event:
+			case <-ctx.Done():
+			}
+		})
+		if ctx.Err() == nil {
+			slog.ErrorContext(ctx, "the links can no longer be told of", "error", err)
+		}
+	})
+
+	go opened.loop(ctx)
+
+	return opened, nil
+}
+
+// Close leaves the network and returns when everything the Engine
+// started has ended. Everything asked of it afterwards is ErrClosed.
+func (e *Engine) Close() error {
+	e.closing.Do(func() {
+		e.stop()
+		<-e.done
+		e.running.Wait()
+	})
+
+	return nil
+}
+
+// do runs something on the loop and waits for it.
+func (e *Engine) do(run func()) error {
+	finished := make(chan struct{})
+
+	select {
+	case e.calls <- func() { run(); close(finished) }:
+		<-finished
+
+		return nil
+	case <-e.done:
+		return ErrClosed
+	}
+}
+
+// loop is the Engine: one thing at a time, and then every timer that is
+// due.
+func (e *Engine) loop(ctx context.Context) {
+	defer close(e.done)
+
+	wake := time.NewTimer(time.Hour)
+	defer wake.Stop()
+
+	for {
+		e.now = time.Now()
+
+		for len(e.timers) > 0 && !e.timers[0].at.After(e.now) {
+			if due, ok := heap.Pop(&e.timers).(*timer); ok {
+				due.run()
+			}
+		}
+
+		wait := time.Hour
+		if len(e.timers) > 0 {
+			wait = e.timers[0].at.Sub(e.now)
+		}
+
+		wake.Reset(wait)
+
+		select {
+		case <-ctx.Done():
+			e.leave()
+
+			return
+		case event := <-e.events:
+			e.now = time.Now()
+			e.linked(event)
+		case arrived := <-e.packets:
+			e.now = time.Now()
+			e.receive(arrived)
+		case call := <-e.calls:
+			e.now = time.Now()
+
+			call()
+		case <-wake.C:
+		}
+	}
+}
+
+// leave closes the links, which ends their readers.
+func (e *Engine) leave() {
+	for _, left := range e.links {
+		_ = left.wire.Close()
+	}
+}
+
+// timer is something to do at a time.
+type timer struct {
+	at  time.Time
+	run func()
+	// index is where it is in the heap, and below zero when it is not.
+	index int
+}
+
+// after does something in a while, on the loop.
+func (e *Engine) after(wait time.Duration, run func()) *timer {
+	return e.at(e.now.Add(wait), run)
+}
+
+func (e *Engine) at(when time.Time, run func()) *timer {
+	set := &timer{at: when, run: run}
+	heap.Push(&e.timers, set)
+
+	return set
+}
+
+// cancel takes back a timer that has not run. One that has, or none, is
+// left alone.
+func (e *Engine) cancel(set *timer) {
+	if set != nil && set.index >= 0 {
+		heap.Remove(&e.timers, set.index)
+	}
+}
+
+// timers is the timers to come, the soonest first.
+type timers []*timer
+
+func (t *timers) Len() int           { return len(*t) }
+func (t *timers) Less(i, j int) bool { return (*t)[i].at.Before((*t)[j].at) }
+
+func (t *timers) Swap(i, j int) {
+	(*t)[i], (*t)[j] = (*t)[j], (*t)[i]
+	(*t)[i].index, (*t)[j].index = i, j
+}
+
+func (t *timers) Push(pushed any) {
+	if set, ok := pushed.(*timer); ok {
+		set.index = len(*t)
+		*t = append(*t, set)
+	}
+}
+
+func (t *timers) Pop() any {
+	old := *t
+	last := old[len(old)-1]
+	last.index = -1
+	*t = old[:len(old)-1]
+
+	return last
+}

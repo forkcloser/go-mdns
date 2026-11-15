@@ -93,7 +93,8 @@ const (
 
 // Link is one interface of the host, for one family: where Multicast DNS
 // is heard and said on it. Its methods may be called from several
-// goroutines.
+// goroutines. A Link is told from another by ==, and stays the same
+// value for as long as it is up.
 //
 //nolint:interfacebloat // what a link is, where it is and what it does: none of the eight is another's
 type Link interface {
@@ -112,7 +113,9 @@ type Link interface {
 	// Read waits for the next packet sent to port 5353 on this link and
 	// copies it into p, which holds MaxPacket bytes. It says who sent
 	// it, and from which port; and whether it was sent to the group or
-	// to this host alone. After Close it returns an error.
+	// to this host alone. A link does not read what it sent itself; it
+	// does read what another program on the host sent. After Close it
+	// returns an error.
 	Read(p []byte) (n int, from netip.AddrPort, group bool, err error)
 	// Multicast sends p to the family's group, on this link, from port
 	// 5353, with an IP TTL or hop limit of 255: older listeners drop

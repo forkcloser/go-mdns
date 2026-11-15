@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/forkcloser/go-mdns/internal/engine"
 	"github.com/forkcloser/go-mdns/internal/todo"
 )
 
@@ -129,13 +130,26 @@ type Answer struct {
 // for what they have no word for: a reverse lookup, a record of another
 // type.
 func (p *Peer) Ask(ctx context.Context, question Question, handle func(Change, Answer)) error {
-	return todo.ImplementMe(p, ctx, question, handle)
+	if err := question.Name.Validate(); err != nil {
+		return err
+	}
+
+	asked := engine.Question{Name: question.Name, Type: uint16(question.Type), Interfaces: question.Interfaces}
+
+	return translate(p.engine.Ask(ctx, asked, func(change engine.Change, answer engine.Answer) {
+		handle(Change(change), Answer{Record: recordOf(answer.Record), Interfaces: answer.Interfaces})
+	}))
 }
 
 // ReconfirmRecord is Reconfirm for one record: it was acted on, and was
 // wrong.
 func (p *Peer) ReconfirmRecord(doubted Record) error {
-	return todo.ImplementMe(p, doubted)
+	written, err := doubted.wire()
+	if err != nil {
+		return err
+	}
+
+	return translate(p.engine.Reconfirm(written))
 }
 
 // Records is a set of records to publish.
