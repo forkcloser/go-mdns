@@ -29,6 +29,8 @@ type link struct {
 	// wished is when an answer of our own was last asked for: one sent
 	// to this host alone is taken for two seconds after.
 	wished time.Time
+	// refused says the link refused the last thing said on it.
+	refused bool
 
 	// standing is what is published on the link; out the records it has
 	// to say to all and when, and replying the timer that says them;

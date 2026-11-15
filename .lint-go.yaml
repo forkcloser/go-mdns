@@ -12,9 +12,3 @@ golangci:
         - path: example_test\.go
           linters:
             - testableexamples
-    settings:
-      wrapcheck:
-        # A body that is not built returns the marker's error as it is.
-        # This goes with the package, when the last of them is built.
-        ignore-package-globs:
-          - github.com/forkcloser/go-mdns/internal/todo

@@ -34,7 +34,6 @@ import (
 	"sync"
 
 	"github.com/forkcloser/go-mdns/internal/engine"
-	"github.com/forkcloser/go-mdns/internal/todo"
 	"github.com/forkcloser/go-mdns/transport"
 )
 
@@ -150,10 +149,6 @@ func Open(ctx context.Context, cfg Config) (*Peer, error) {
 	network := cfg.Network
 	if network == nil {
 		network = transport.System()
-	}
-
-	if network == nil {
-		return nil, todo.ImplementMe(ctx, cfg)
 	}
 
 	opened, err := engine.Open(ctx, engine.Config{Network: network, Families: cfg.Families, Interfaces: cfg.Interfaces})
