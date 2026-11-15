@@ -24,7 +24,8 @@ IPv4 and IPv6, on every interface a host has.
 Examples, compiled with the code: [announcing, announcing for a service that is somewhere
 else, browsing, resolving, asking, and two peers on a wire](../example_test.go).
 
-Built: names, and the rules a service and its text record are held to. Every other body
+Built: names, the rules a service and its text record are held to, and the reading and
+writing of messages ([`internal/wire`](../internal/wire/wire.go)). Every other body
 goes through [`internal/todo`](../internal/todo/todo.go), which prints `IMPLEMENT ME` and
 returns an error; the package goes when the last of them is built.
 
