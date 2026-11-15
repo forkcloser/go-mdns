@@ -109,6 +109,8 @@ func (h *Host) Watch(ctx context.Context, handle func(transport.Event)) error {
 	for _, port := range h.ports {
 		port.open(watching)
 	}
+
+	watching.events = append(watching.events, transport.Event{Change: transport.Settled})
 	h.network.mu.Unlock()
 
 	defer h.unwatch(watching)

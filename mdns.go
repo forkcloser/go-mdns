@@ -153,7 +153,7 @@ func Open(ctx context.Context, cfg Config) (*Peer, error) {
 
 	opened, err := engine.Open(ctx, engine.Config{Network: network, Families: cfg.Families, Interfaces: cfg.Interfaces})
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalid, err)
+		return nil, translate(err)
 	}
 
 	life, stop := context.WithCancel(context.WithoutCancel(ctx))

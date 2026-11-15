@@ -45,6 +45,12 @@ type link struct {
 
 // linked takes a link that came up, changed or went down.
 func (e *Engine) linked(event transport.Event) {
+	if event.Change == transport.Settled {
+		e.first.Do(func() { close(e.settled) })
+
+		return
+	}
+
 	known := e.links[event.Link]
 
 	switch {

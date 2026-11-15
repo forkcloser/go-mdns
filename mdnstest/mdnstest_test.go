@@ -18,18 +18,38 @@ import (
 // watching is a host being watched: its events, as they come.
 type watching struct {
 	events chan transport.Event
-	ended  chan error
-	stop   context.CancelFunc
+	// settled is told each time the host says that is all its links,
+	// with how many events it had told of before.
+	settled chan int
+	ended   chan error
+	stop    context.CancelFunc
 }
 
 func watch(t *testing.T, host *mdnstest.Host) *watching {
 	t.Helper()
 
 	ctx, stop := context.WithCancel(t.Context())
-	watched := &watching{events: make(chan transport.Event, 64), ended: make(chan error, 1), stop: stop}
+	watched := &watching{
+		events:  make(chan transport.Event, 64),
+		settled: make(chan int, 4),
+		ended:   make(chan error, 1),
+		stop:    stop,
+	}
 
 	go func() {
-		watched.ended <- host.Watch(ctx, func(event transport.Event) { watched.events <- event })
+		told := 0
+
+		watched.ended <- host.Watch(ctx, func(event transport.Event) {
+			if event.Change == transport.Settled {
+				watched.settled <- told
+
+				return
+			}
+
+			told++
+
+			watched.events <- event
+		})
 	}()
 
 	t.Cleanup(stop)
@@ -633,5 +653,32 @@ func TestASocketOnAnotherPort(t *testing.T) {
 
 	if err = socket.Multicast(nil); !errors.Is(err, net.ErrClosed) {
 		t.Errorf("sending from a socket that is closed: %v", err)
+	}
+}
+
+// A host says that is all its links once, after the links there were
+// and before any that comes later.
+func TestAllTheLinksThereWere(t *testing.T) {
+	t.Parallel()
+
+	var network mdnstest.Network
+
+	for links, ports := range map[int][]mdnstest.Port{0: nil, 2: {{Interface: "en0", Wire: "lan"}}} {
+		host := network.Host(ports...)
+		watched := watch(t, host)
+
+		if told := <-watched.settled; told != links {
+			t.Errorf("said to be all after %d links, of %d", told, links)
+		}
+
+		host.Plug(mdnstest.Port{Interface: "later", Wire: "lan"})
+		watched.next(t, transport.Up)
+		watched.next(t, transport.Up)
+
+		select {
+		case told := <-watched.settled:
+			t.Errorf("said to be all again, after %d links", told)
+		default:
+		}
 	}
 }
