@@ -1,0 +1,20 @@
+# This project's carve-outs from the Go lint baseline (.limen/lint-go.yaml):
+# the baseline's sections, in its shape, holding only what this project adds,
+# changes or takes out. `just do lint go` renders the two on every run
+# (book/linting-go.md, "one baseline, per-project carve-outs").
+
+golangci:
+  linters:
+    exclusions:
+      rules:
+        # The examples open a peer on a network: there is no output of theirs
+        # a test run could check.
+        - path: example_test\.go
+          linters:
+            - testableexamples
+    settings:
+      wrapcheck:
+        # A body that is not built returns the marker's error as it is.
+        # This goes with the package, when the last of them is built.
+        ignore-package-globs:
+          - github.com/forkcloser/go-mdns/internal/todo
