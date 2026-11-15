@@ -15,8 +15,6 @@ package transport
 import (
 	"context"
 	"net/netip"
-
-	"github.com/forkcloser/go-mdns/internal/todo"
 )
 
 // Family is IPv4 or IPv6.
@@ -126,14 +124,4 @@ type Link interface {
 	Unicast(p []byte, to netip.AddrPort) error
 	// Close gives the link up. A Read under way returns.
 	Close() error
-}
-
-// System is the host's own network: every interface that is up and
-// carries multicast, the loopback aside, for each family it has an
-// address of. It shares port 5353 with the system's own responder, when
-// there is one.
-func System() Network {
-	_ = todo.ImplementMe()
-
-	return nil
 }

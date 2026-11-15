@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"slices"
 	"time"
@@ -597,7 +598,17 @@ func (l *link) sayKnown(message *wire.Builder, known []wire.Record) *wire.Builde
 // say sends a message to everyone on the link. One that cannot be sent
 // is one that was lost, which the protocol expects of any.
 func (l *link) say(message []byte) {
-	_ = l.wire.Multicast(message)
+	err := l.wire.Multicast(message)
+
+	// Said once for a link that goes on refusing: a host that cannot
+	// speak at all should know, and not in every line of its log.
+	if (err != nil) != l.refused {
+		l.refused = err != nil
+
+		if err != nil {
+			slog.Warn("a link refuses what is said on it", "interface", l.iface.Name, "error", err)
+		}
+	}
 }
 
 // known is what a link has heard that answers a question and has more

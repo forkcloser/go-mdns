@@ -24,13 +24,13 @@ IPv4 and IPv6, on every interface a host has.
 Examples, compiled with the code: [announcing, announcing for a service that is somewhere
 else, browsing, resolving, asking, and two peers on a wire](../example_test.go).
 
-Built: everything but the host's own network. Names and the rules a service is held to;
-the reading and writing of messages ([`internal/wire`](../internal/wire/wire.go)); records
-asked for and answered for ([`internal/engine`](../internal/engine/engine.go)); services
-announced and found on them ([`announce.go`](../announce.go), [`browser.go`](../browser.go),
-[`host.go`](../host.go)); and the network of tests. `transport.System` and the command go
-through [`internal/todo`](../internal/todo/todo.go), which prints `IMPLEMENT ME` and
-returns an error: until they are built a Peer is opened on a `Network` it is given.
+Built: the library, whole. Names and the rules a service is held to; the reading and
+writing of messages ([`internal/wire`](../internal/wire/wire.go)); records asked for and
+answered for ([`internal/engine`](../internal/engine/engine.go)); services announced and
+found on them ([`announce.go`](../announce.go), [`browser.go`](../browser.go),
+[`host.go`](../host.go)); the host's own network
+([`transport/system.go`](../transport/system.go)); and the network of tests. The command
+is declared below and not built.
 
 ## What the API holds itself to
 
@@ -247,16 +247,31 @@ MTU (§17), and the IP TTL of what a link sends (§11).
 ## How the network is known
 
 `transport.System` has to answer, on each system, which interface a packet came in on.
-[What exists](landscape.md) found that this is where every Go library is weakest. The
-plan, to be proven by a run on each system and not before:
+[What exists](landscape.md) found that this is where every Go library is weakest: those
+that ask the system do it through `golang.org/x/net`, which has no answer on Windows.
 
-- **Linux and macOS**: one socket for each family, on port 5353, joined to the group on
-  every interface, with the packet's interface read from its control message.
-- **Windows**: `golang.org/x/net` gives no control message there. Either one socket for
-  each interface, bound to its address, or the packet information read through the
-  system's own calls. Which, is for a run on Windows to say.
+It is one way on Linux, macOS and Windows, with the standard library alone: one socket
+for each family on port 5353, shared with whatever else is on it, joined to the group on
+every interface, with the system asked to say of each packet where it came in and what
+address it was sent to. Go's own `net` hands that over on all three; only its layout
+differs, and that is a few lines for each system
+([`system_unix.go`](../transport/system_unix.go),
+[`system_windows.go`](../transport/system_windows.go)). The address a packet was sent to
+is what tells one said to all from one said to this host alone.
 
-A `Link` hides the difference. That is what it is for.
+- **Which interfaces.** Those that are up and carry multicast, the loopback and
+  point-to-point links aside, for each family they have an address of. On macOS, Apple's
+  wireless direct links (`awdl`, `llw`) are left out: a packet sent to one wakes a radio,
+  and the system's responder has its own way with them.
+- **How they are watched.** The interfaces are looked at every two seconds, which is the
+  longest a link that comes, goes or changes its addresses goes untold. Each system has
+  a way to be told instead; none is used yet.
+- **What a link sent comes back to it**, since the system hands it to every socket on
+  the port so that other programs on the host hear it. A link knows its own by the
+  address and the bytes, for two seconds, and does not read it.
+
+On any other system `System` is there and its `Watch` is `errors.ErrUnsupported`: a Peer
+is then opened on a `Network` of the program's own.
 
 ## Left out, on purpose
 
@@ -271,20 +286,22 @@ A `Link` hides the difference. That is what it is for.
   them. `Publish` can say them and `Ask` can read them; `Service` and `Instance` have
   one.
 
-## To settle when it is built
+## Still to settle
 
-1. **Windows.** Which of the two ways, and whether a socket there can share port 5353
-   with the system's own responder and still be answered by unicast.
-2. **Unicast answers beside a system responder**, on any system. Two programs on one
-   port: the system hands a packet sent to the host alone to the first that bound it.
-   RFC 6762 §15.1 has the second detect that and stop asking for unicast answers; how
-   `transport.System` tells, and how it says so to the Peer, is for the build.
+1. **Unicast answers beside a system responder.** Two programs on one port: the system
+   hands a packet sent to the host alone to one of them. RFC 6762 §15.1 has the others detect that and stop asking for unicast answers;
+   `transport.System` does not tell yet, so an answer asked for that way may go to the
+   system's responder and be asked for again.
+2. **Being told of interfaces, not looking.** Netlink on Linux, a routing socket on
+   macOS, `NotifyIpInterfaceChange` on Windows, in place of the look every two seconds.
 3. **Conformance.** Apple's Bonjour Conformance Test is the one real suite, runs on a
    Mac against a device on the network, and is closed. A harness for it, and
    interoperation with Avahi and Apple's responder in continuous integration, are what
    "the spec, whole" will be measured by.
 4. **IPv6 addresses worth announcing.** Which of an interface's the default leaves out:
    a temporary address cannot be told from another on every system.
+5. **A probe too large for one packet.** The names a set asks for go out in one message
+   with what it means to say of them; a set whose records do not fit one is not split.
 
 [6762]: https://www.rfc-editor.org/rfc/rfc6762
 [6763]: https://www.rfc-editor.org/rfc/rfc6763
