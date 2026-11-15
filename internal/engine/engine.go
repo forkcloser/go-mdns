@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -44,7 +45,8 @@ type Config struct {
 type Engine struct {
 	cfg  Config
 	stop context.CancelFunc
-	// done is closed when the loop has ended.
+	// quit is closed to end the loop, and done when it has ended.
+	quit    chan struct{}
 	done    chan struct{}
 	calls   chan func()
 	events  chan transport.Event
@@ -60,6 +62,12 @@ type Engine struct {
 	asked  map[askKey]*asking
 	named  map[string][]*asking
 	sweep  *timer
+
+	// pubs is what is published; seq orders its records; conflicts is
+	// when names were lately lost.
+	pubs      []*Publication
+	seq       int
+	conflicts []time.Time
 }
 
 // arrival is a message read from a link.
@@ -81,6 +89,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 	opened := &Engine{
 		cfg:     cfg,
 		stop:    stop,
+		quit:    make(chan struct{}),
 		done:    make(chan struct{}),
 		calls:   make(chan func()),
 		events:  make(chan transport.Event),
@@ -102,7 +111,7 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		}
 	})
 
-	go opened.loop(ctx)
+	go opened.loop()
 
 	return opened, nil
 }
@@ -110,9 +119,12 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 // Close leaves the network and returns when everything the Engine
 // started has ended. Everything asked of it afterwards is ErrClosed.
 func (e *Engine) Close() error {
+	// The loop first, while the links are still there to say goodbye on:
+	// a network closes them when it is no longer watched.
 	e.closing.Do(func() {
-		e.stop()
+		close(e.quit)
 		<-e.done
+		e.stop()
 		e.running.Wait()
 	})
 
@@ -135,7 +147,7 @@ func (e *Engine) do(run func()) error {
 
 // loop is the Engine: one thing at a time, and then every timer that is
 // due.
-func (e *Engine) loop(ctx context.Context) {
+func (e *Engine) loop() {
 	defer close(e.done)
 
 	wake := time.NewTimer(time.Hour)
@@ -150,15 +162,20 @@ func (e *Engine) loop(ctx context.Context) {
 			}
 		}
 
-		wait := time.Hour
+		// With nothing to wait for, nothing is waited for: an Engine
+		// with nothing to do does not wake.
+		var woken <-chan time.Time
+
+		wake.Stop()
+
 		if len(e.timers) > 0 {
-			wait = e.timers[0].at.Sub(e.now)
+			wake.Reset(e.timers[0].at.Sub(e.now))
+
+			woken = wake.C
 		}
 
-		wake.Reset(wait)
-
 		select {
-		case <-ctx.Done():
+		case <-e.quit:
 			e.leave()
 
 			return
@@ -172,13 +189,18 @@ func (e *Engine) loop(ctx context.Context) {
 			e.now = time.Now()
 
 			call()
-		case <-wake.C:
+		case <-woken:
 		}
 	}
 }
 
-// leave closes the links, which ends their readers.
+// leave says goodbye for everything published, and closes the links,
+// which ends their readers.
 func (e *Engine) leave() {
+	for _, published := range slices.Clone(e.pubs) {
+		e.end(published, ErrClosed)
+	}
+
 	for _, left := range e.links {
 		_ = left.wire.Close()
 	}

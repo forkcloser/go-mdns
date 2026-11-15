@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/forkcloser/go-mdns/internal/engine"
-	"github.com/forkcloser/go-mdns/internal/todo"
+	"github.com/forkcloser/go-mdns/internal/wire"
 )
 
 // Type is a record's type, as DNS numbers them.
@@ -168,7 +168,9 @@ type Records struct {
 }
 
 // Publication is a set of records being published.
-type Publication struct{}
+type Publication struct {
+	published *engine.Publication
+}
 
 // Publish answers for a set of records on every link the Peer is on, as
 // Announce does for a service: names that are the host's alone are
@@ -176,24 +178,81 @@ type Publication struct{}
 // being no one name to try in its place. It is what Announce is made
 // of, and is there for what it has no word for.
 func (p *Peer) Publish(ctx context.Context, records Records) (*Publication, error) {
-	return nil, todo.ImplementMe(p, ctx, records)
+	set := engine.Set{Interfaces: records.Interfaces}
+
+	for _, record := range records.Records {
+		written, err := record.wire()
+		if err != nil {
+			return nil, err
+		}
+
+		written.Flush = !records.Shared
+		if written.TTL == 0 {
+			written.TTL = defaultTTL(written)
+		}
+
+		set.Records = append(set.Records, written)
+	}
+
+	published, err := p.engine.Publish(ctx, set)
+	if err != nil {
+		return nil, translate(err)
+	}
+
+	return &Publication{published: published}, nil
+}
+
+// What RFC 6762 section 10 recommends a record be remembered for: two
+// minutes for one whose name is a host's or whose data holds a host's
+// name, 75 minutes for the rest.
+const (
+	hostTTL  = 120
+	otherTTL = 75 * 60
+	// typeHINFO is the type of a record that says what a host is.
+	typeHINFO = 13
+)
+
+// defaultTTL is how long a record is remembered when it does not say:
+// two minutes for an address, a host's description, a service's
+// whereabouts, and a pointer from an address back to its host.
+func defaultTTL(record wire.Record) uint32 {
+	switch record.Type() {
+	case wire.TypeA, wire.TypeAAAA, wire.TypeSRV, typeHINFO:
+		return hostTTL
+	case wire.TypePTR:
+		if reverse(record.Name) {
+			return hostTTL
+		}
+	}
+
+	return otherTTL
+}
+
+// reverse says whether a name is one that maps an address back to a
+// host: under in-addr.arpa or ip6.arpa.
+func reverse(name []string) bool {
+	const depth = 2
+
+	if len(name) < depth || !sameLabel(name[len(name)-1], "arpa") {
+		return false
+	}
+
+	return sameLabel(name[len(name)-depth], "in-addr") || sameLabel(name[len(name)-depth], "ip6")
 }
 
 // Close withdraws the records: the neighbours are told goodbye.
 func (b *Publication) Close() error {
-	return todo.ImplementMe(b)
+	return translate(b.published.Close())
 }
 
 // Done is closed when the records are no longer published: withdrawn,
 // or lost to another host that holds one of their names.
 func (b *Publication) Done() <-chan struct{} {
-	_ = todo.ImplementMe(b)
-
-	return nil
+	return b.published.Done()
 }
 
 // Err is why, once Done is closed: ErrClosed, or ErrConflict. Nil until
 // then.
 func (b *Publication) Err() error {
-	return todo.ImplementMe(b)
+	return translate(b.published.Err())
 }

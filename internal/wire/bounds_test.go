@@ -256,11 +256,21 @@ func TestTheBoundsOfAMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if read, err := wire.Parse(
-		message.Bytes(),
-	); err != nil || read.Answers[0].Flush ||
-		read.Answers[0].Class != wire.ClassIN {
+	read, err := wire.Parse(message.Bytes())
+	if err != nil || read.Answers[0].Flush || read.Answers[0].Class != wire.ClassIN {
 		t.Errorf("a class with its top bit set and no Flush: read as %+v, %v", read.Answers, err)
+	}
+
+	// And of a question's, by Unicast.
+	message = wire.NewBuilder(nil, wire.Header{}, wire.Options{})
+
+	if err = message.Question(wire.Question{Name: []string{"a"}, Type: wire.TypeA, Class: 0x8001}); err != nil {
+		t.Fatal(err)
+	}
+
+	asked, err := wire.Parse(message.Bytes())
+	if err != nil || asked.Questions[0].Unicast || asked.Questions[0].Class != wire.ClassIN {
+		t.Errorf("a question's class with its top bit set and no Unicast: read as %+v, %v", asked.Questions, err)
 	}
 }
 

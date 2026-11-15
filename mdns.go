@@ -156,6 +156,8 @@ func translate(err error) error {
 		return nil
 	case errors.Is(err, engine.ErrClosed):
 		return ErrClosed
+	case errors.Is(err, engine.ErrConflict):
+		return ErrConflict
 	case errors.Is(err, engine.ErrInvalid):
 		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	default:
