@@ -1,13 +1,10 @@
 package mdns
 
 import (
-	"context"
 	"fmt"
 	"net/netip"
 	"strings"
 	"time"
-
-	"github.com/forkcloser/go-mdns/internal/todo"
 )
 
 const (
@@ -279,62 +276,4 @@ func (e Entry) size() (int, error) {
 	}
 
 	return size, nil
-}
-
-// Announcement is a service being announced.
-type Announcement struct{}
-
-// Announce offers a service on every link the Peer is on, and on each it
-// comes to be on. It first asks, on each link, whether the name is free,
-// as RFC 6762 has it; a name another host holds is put to the service's
-// Rename, and the answer tried. It returns once the service is announced
-// on the links there are, under the name it ended with, which Name
-// gives; or with ErrConflict when Rename gave up, ErrInvalid for a
-// service that does not validate, or ctx's error, the service then
-// withdrawn.
-//
-// From then on the Peer answers for the service, defends its name,
-// announces it on links that come up, and renames it should a host turn
-// up later with the same one.
-func (p *Peer) Announce(ctx context.Context, service Service) (*Announcement, error) {
-	return nil, todo.ImplementMe(p, ctx, service)
-}
-
-// Name is the instance name the service is announced under now: the one
-// asked for, or the one it was renamed to.
-func (a *Announcement) Name() string {
-	_ = todo.ImplementMe(a)
-
-	return ""
-}
-
-// Update changes the service's text record and tells the neighbours, as
-// RFC 6762 has a changed record told. Nothing else of a service changes
-// while it is announced: a new port is a new announcement.
-//
-// A text that changes more than ten times a minute is more than the
-// protocol means to carry: the neighbours are told of the last, not of
-// each.
-func (a *Announcement) Update(ctx context.Context, text TXT) error {
-	return todo.ImplementMe(a, ctx, text)
-}
-
-// Close withdraws the service: its neighbours are told goodbye, and
-// forget it at once.
-func (a *Announcement) Close() error {
-	return todo.ImplementMe(a)
-}
-
-// Done is closed when the service is no longer announced: withdrawn by
-// Close or by the Peer's, or renamed to nothing by Rename.
-func (a *Announcement) Done() <-chan struct{} {
-	_ = todo.ImplementMe(a)
-
-	return nil
-}
-
-// Err is why, once Done is closed: ErrClosed, or ErrConflict. Nil until
-// then.
-func (a *Announcement) Err() error {
-	return todo.ImplementMe(a)
 }

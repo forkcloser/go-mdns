@@ -153,6 +153,108 @@ func (e *Engine) Ask(ctx context.Context, question Question, handle func(Change,
 	}
 }
 
+// Group is questions asked together, for one who puts what they bring
+// together: what several questions have to tell is told at once, as it
+// stands at one moment, and not one question after another. It is one
+// goroutine's to use.
+type Group struct {
+	engine *Engine
+	dirty  chan struct{}
+	// What follows is the loop's.
+	watchers map[int]*watcher
+	last     int
+}
+
+// Told is what a question of a Group has to tell.
+type Told struct {
+	// Question is the question, as Add numbered it.
+	Question int
+	Change   Change
+	Answer   Answer
+}
+
+// Group makes a Group with no question in it.
+func (e *Engine) Group() *Group {
+	return &Group{engine: e, dirty: make(chan struct{}, 1), watchers: map[int]*watcher{}}
+}
+
+// Add asks one more question, and gives it a number. What is already
+// known of it is told by the next Poll.
+func (g *Group) Add(question Question) (int, error) {
+	asked := wire.Question{Name: question.Name, Type: question.Type, Class: wire.ClassIN}
+	if len(question.Name) == 0 || wire.NewBuilder(nil, wire.Header{}, wire.Options{}).Question(asked) != nil {
+		return 0, fmt.Errorf("%w: a question for %q", ErrInvalid, question.Name)
+	}
+
+	number := 0
+
+	err := g.engine.do(func() {
+		g.last++
+		number = g.last
+		g.watchers[number] = &watcher{interfaces: question.Interfaces, told: map[string]Answer{}, dirty: g.dirty}
+		g.engine.watch(g.watchers[number], asked)
+	})
+
+	return number, err
+}
+
+// Remove asks a question no more. Nothing more is told of it.
+func (g *Group) Remove(question int) {
+	_ = g.engine.do(func() {
+		if watching := g.watchers[question]; watching != nil {
+			g.engine.unwatch(watching)
+			delete(g.watchers, question)
+		}
+	})
+}
+
+// Close asks none of the questions any more.
+func (g *Group) Close() {
+	_ = g.engine.do(func() {
+		for question, watching := range g.watchers {
+			g.engine.unwatch(watching)
+			delete(g.watchers, question)
+		}
+	})
+}
+
+// Poll is what the questions have to tell since the last Poll, as they
+// all stand at one moment, in the order they were added. It is nothing
+// when nothing changed.
+func (g *Group) Poll() ([]Told, error) {
+	var told []Told
+
+	err := g.engine.do(func() {
+		questions := make([]int, 0, len(g.watchers))
+		for question := range g.watchers {
+			questions = append(questions, question)
+		}
+
+		slices.Sort(questions)
+
+		for _, question := range questions {
+			for _, one := range g.engine.news(g.watchers[question]) {
+				told = append(told, Told{Question: question, Change: one.change, Answer: one.answer})
+			}
+		}
+	})
+
+	return told, err
+}
+
+// Wait waits until a Poll may have something to tell, and returns ctx's
+// error when ctx ends first, ErrClosed when the Engine does.
+func (g *Group) Wait(ctx context.Context) error {
+	select {
+	case <-g.dirty:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for answers: %w", context.Cause(ctx))
+	case <-g.engine.done:
+		return ErrClosed
+	}
+}
+
 // watch adds someone who asks to a question, and starts asking it where
 // it was not asked.
 func (e *Engine) watch(watching *watcher, question wire.Question) {

@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"sync"
 
 	"github.com/forkcloser/go-mdns/internal/engine"
 	"github.com/forkcloser/go-mdns/internal/todo"
@@ -104,8 +105,26 @@ func Never(string, int) (string, bool) { return "", false }
 // goroutines.
 type Peer struct {
 	engine *engine.Engine
-	// host is the name asked for, and nil for the system's.
-	host Name
+	// rename and addresses are the configuration's, for the host's
+	// name; wanted is the name asked for, as one label.
+	rename    Rename
+	addresses func(Interface, netip.Addr) bool
+	wanted    string
+	// life ends when the Peer closes, and keeping is what it started
+	// that ends with it.
+	life    context.Context //nolint:containedctx // what outlives a call: a name taken again after it was lost
+	stop    context.CancelFunc
+	keeping sync.WaitGroup
+
+	// claiming is held while a host's name is asked for, so that one is
+	// asked for at a time.
+	claiming sync.Mutex
+	// mu guards what follows: the name held, the hosts announced for
+	// others, and the services announced.
+	mu        sync.Mutex
+	held      *claim
+	others    map[string]*elsewhere
+	announced []*Announcement
 }
 
 // Open makes a Peer and puts it on the network: when it returns, every
@@ -113,7 +132,7 @@ type Peer struct {
 // usable interface is no error: links are taken up as they come, and
 // given up as they go, for as long as the Peer is open.
 func Open(ctx context.Context, cfg Config) (*Peer, error) {
-	var host Name
+	wanted := systemHost()
 
 	if cfg.Hostname != "" {
 		named, err := hostName(cfg.Hostname)
@@ -121,7 +140,11 @@ func Open(ctx context.Context, cfg Config) (*Peer, error) {
 			return nil, err
 		}
 
-		host = named
+		if len(named) != len(Name{wanted, local}) {
+			return nil, fmt.Errorf("%w: the host name %q is more than one label under local", ErrInvalid, cfg.Hostname)
+		}
+
+		wanted = named[0]
 	}
 
 	network := cfg.Network
@@ -138,7 +161,12 @@ func Open(ctx context.Context, cfg Config) (*Peer, error) {
 		return nil, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 
-	return &Peer{engine: opened, host: host}, nil
+	life, stop := context.WithCancel(context.WithoutCancel(ctx))
+
+	return &Peer{
+		engine: opened, rename: cfg.Rename, addresses: cfg.Addresses, wanted: wanted,
+		life: life, stop: stop, others: map[string]*elsewhere{},
+	}, nil
 }
 
 // Close says goodbye for everything the Peer announces, leaves the
@@ -146,7 +174,12 @@ func Open(ctx context.Context, cfg Config) (*Peer, error) {
 // every call that returns an error returns ErrClosed, and every Browse
 // and Ask in flight ends with it.
 func (p *Peer) Close() error {
-	return translate(p.engine.Close())
+	p.stop()
+
+	err := p.engine.Close()
+	p.keeping.Wait()
+
+	return translate(err)
 }
 
 // translate says an engine's error in this package's words.
@@ -169,13 +202,14 @@ func translate(err error) error {
 // one asked for, or the one it was renamed to. Before anything is
 // announced it is the name that will be claimed.
 func (p *Peer) Hostname() string {
-	if p.host != nil {
-		return p.host.String()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.held != nil {
+		return Name{p.held.label, local}.String()
 	}
 
-	_ = todo.ImplementMe(p)
-
-	return ""
+	return Name{p.wanted, local}.String()
 }
 
 // On chooses interfaces by name, for the fields that take a choice of
