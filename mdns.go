@@ -27,9 +27,12 @@ package mdns
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/netip"
 	"slices"
 
+	"github.com/forkcloser/go-mdns/internal/engine"
 	"github.com/forkcloser/go-mdns/internal/todo"
 	"github.com/forkcloser/go-mdns/transport"
 )
@@ -99,14 +102,43 @@ func Never(string, int) (string, bool) { return "", false }
 // Peer is a host's part in Multicast DNS: its responder and its querier,
 // on every link it is on. Its methods may be called from several
 // goroutines.
-type Peer struct{}
+type Peer struct {
+	engine *engine.Engine
+	// host is the name asked for, and nil for the system's.
+	host Name
+}
 
 // Open makes a Peer and puts it on the network: when it returns, every
 // other method works. ctx bounds the opening alone. A host with no
 // usable interface is no error: links are taken up as they come, and
 // given up as they go, for as long as the Peer is open.
 func Open(ctx context.Context, cfg Config) (*Peer, error) {
-	return nil, todo.ImplementMe(ctx, cfg)
+	var host Name
+
+	if cfg.Hostname != "" {
+		named, err := hostName(cfg.Hostname)
+		if err != nil {
+			return nil, err
+		}
+
+		host = named
+	}
+
+	network := cfg.Network
+	if network == nil {
+		network = transport.System()
+	}
+
+	if network == nil {
+		return nil, todo.ImplementMe(ctx, cfg)
+	}
+
+	opened, err := engine.Open(ctx, engine.Config{Network: network, Families: cfg.Families, Interfaces: cfg.Interfaces})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+
+	return &Peer{engine: opened, host: host}, nil
 }
 
 // Close says goodbye for everything the Peer announces, leaves the
@@ -114,13 +146,31 @@ func Open(ctx context.Context, cfg Config) (*Peer, error) {
 // every call that returns an error returns ErrClosed, and every Browse
 // and Ask in flight ends with it.
 func (p *Peer) Close() error {
-	return todo.ImplementMe(p)
+	return translate(p.engine.Close())
+}
+
+// translate says an engine's error in this package's words.
+func translate(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, engine.ErrClosed):
+		return ErrClosed
+	case errors.Is(err, engine.ErrInvalid):
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
+	default:
+		return err
+	}
 }
 
 // Hostname is the name the host answers to now, ending in ".local": the
 // one asked for, or the one it was renamed to. Before anything is
 // announced it is the name that will be claimed.
 func (p *Peer) Hostname() string {
+	if p.host != nil {
+		return p.host.String()
+	}
+
 	_ = todo.ImplementMe(p)
 
 	return ""
