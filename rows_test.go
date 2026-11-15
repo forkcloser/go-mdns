@@ -828,3 +828,161 @@ func TestTheAddressesAHostIsAnnouncedAt(t *testing.T) {
 		}
 	})
 }
+
+// A service a Peer already announces is taken, as one another host has
+// would be, however it is written the second time: it is put to Rename,
+// or refused when no other name is wanted. Withdrawn, its name is free.
+func TestAServiceAnnouncedTwiceByOneHost(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		kitchen := peer(t, &network, "kitchen", wired("en0", "lan", "1"))
+		browser := peer(t, &network, "browser", wired("en0", "lan", "2"))
+		found := browse(t, browser, mdns.Query{Type: "_http._tcp"})
+
+		var first *mdns.Announcement
+
+		for index, row := range []struct {
+			service mdns.Service
+			named   string
+		}{
+			{mdns.Service{Name: "Oven", Type: "_http._tcp", Port: 1}, "Oven"},
+			{mdns.Service{Name: "Oven", Type: "_http._tcp", Port: 2}, "Oven (2)"},
+			// "oven (2)" is "Oven (2)" to the network, and that one is held too.
+			{mdns.Service{Name: "oven", Type: "_http._tcp.", Port: 3}, "oven (3)"},
+			{mdns.Service{Type: "_http._tcp", Port: 4}, "kitchen"},
+			{mdns.Service{Name: "Kitchen", Type: "_http._tcp", Port: 5}, "Kitchen (2)"},
+		} {
+			announced, err := kitchen.Announce(t.Context(), row.service)
+			if err != nil {
+				t.Fatalf("service %d: %v", index+1, err)
+			}
+
+			if announced.Name() != row.named {
+				t.Errorf("service %d is announced as %q, not %q", index+1, announced.Name(), row.named)
+			}
+
+			if index == 0 {
+				first = announced
+			}
+		}
+
+		if _, err := kitchen.Announce(
+			t.Context(),
+			mdns.Service{Name: "Oven", Type: "_http._tcp", Port: 6, Rename: mdns.Never},
+		); !errors.Is(err, mdns.ErrConflict) {
+			t.Errorf("a service already announced, and no other name wanted: %v", err)
+		}
+
+		time.Sleep(5 * time.Second)
+
+		ports := map[string]uint16{}
+		for name, instance := range found.stands(t) {
+			ports[name] = instance.Port
+		}
+
+		if want := map[string]uint16{
+			"Oven": 1, "Oven (2)": 2, "oven (3)": 3, "kitchen": 4, "Kitchen (2)": 5,
+		}; !reflect.DeepEqual(ports, want) {
+			t.Errorf("found %v, want %v", ports, want)
+		}
+
+		_ = first.Close()
+
+		again, err := kitchen.Announce(
+			t.Context(),
+			mdns.Service{Name: "Oven", Type: "_http._tcp", Port: 7, Rename: mdns.Never},
+		)
+		if err != nil || again.Name() != "Oven" {
+			t.Errorf("a name that was withdrawn: %v", err)
+		}
+	})
+}
+
+// A record of another type under a name the Peer holds is the Peer's to
+// publish, before a service is announced or after: the host keeps its
+// name, and its neighbours hear both.
+func TestARecordOfAnotherTypeUnderTheHostsName(t *testing.T) {
+	t.Parallel()
+
+	info := mdns.Records{Records: []mdns.Record{{
+		Name: mdns.Name{"kitchen", "local"}, TTL: 2 * time.Minute, Data: mdns.Raw{Kind: 13, Bytes: []byte("\x03ARM")},
+	}}}
+	service := mdns.Service{Name: "Oven", Type: "_http._tcp", Port: 1}
+
+	for what, first := range map[string]bool{"the service first": true, "the record first": false} {
+		synctest.Test(t, func(t *testing.T) {
+			var network mdnstest.Network
+
+			kitchen := peer(t, &network, "kitchen", wired("en0", "lan", "1"))
+
+			if first {
+				if _, err := kitchen.Announce(t.Context(), service); err != nil {
+					t.Fatalf("%s: %v", what, err)
+				}
+			}
+
+			if _, err := kitchen.Publish(t.Context(), info); err != nil {
+				t.Fatalf("%s: the record: %v", what, err)
+			}
+
+			if !first {
+				if _, err := kitchen.Announce(t.Context(), service); err != nil {
+					t.Fatalf("%s: %v", what, err)
+				}
+			}
+
+			if kitchen.Hostname() != "kitchen.local" {
+				t.Errorf("%s: the host is %q", what, kitchen.Hostname())
+			}
+		})
+	}
+}
+
+// A service announced twice before the host has any link, and another
+// after them: when a link comes up the second takes another name there,
+// and all three are found.
+func TestAServiceAnnouncedTwiceBeforeThereIsALink(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		host := network.Host()
+
+		kitchen, err := mdns.Open(t.Context(), mdns.Config{Network: host, Hostname: "kitchen"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		defer func() { _ = kitchen.Close() }()
+
+		browser := peer(t, &network, "browser", wired("en0", "lan", "2"))
+		found := browse(t, browser, mdns.Query{Type: "_http._tcp"})
+
+		for index, name := range []string{"Oven", "Oven", "Fridge"} {
+			port := []uint16{1, 2, 3}[index]
+
+			if _, err = kitchen.Announce(
+				t.Context(),
+				mdns.Service{Name: name, Type: "_http._tcp", Port: port},
+			); err != nil {
+				t.Fatalf("%s at port %d: %v", name, port, err)
+			}
+		}
+
+		host.Plug(wired("en0", "lan", "1"))
+		time.Sleep(15 * time.Second)
+
+		ports := map[string]uint16{}
+		for name, instance := range found.stands(t) {
+			ports[name] = instance.Port
+		}
+
+		if want := map[string]uint16{"Oven": 1, "Oven (2)": 2, "Fridge": 3}; !reflect.DeepEqual(ports, want) {
+			t.Errorf("found %v, want %v", ports, want)
+		}
+	})
+}
