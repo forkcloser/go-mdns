@@ -24,6 +24,8 @@ import (
 // program is the host's network as one program sees it: its links, by
 // interface and family.
 type program struct {
+	// later is what the host tells of after it said that was all.
+	later chan transport.Event
 	links map[where]transport.Link
 	ended chan error
 	stop  context.CancelFunc
@@ -55,21 +57,24 @@ func run(t *testing.T) *program {
 		}
 	})
 
-	// The host's links are told of at once, before Watch waits.
+	// The host's links, until it says that is all of them.
 	for {
 		select {
 		case event := <-events:
-			if event.Change == transport.Up {
+			switch event.Change {
+			case transport.Up:
 				running.links[where{event.Link.Interface().Index, event.Link.Family()}] = event.Link
-			}
+			case transport.Settled:
+				running.later = events
 
-			continue
+				return running
+			case transport.Changed, transport.Down:
+			}
 		case err := <-running.ended:
 			t.Fatalf("watching the host's network: %v", err)
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(5 * time.Second):
+			t.Fatal("the host never said that was all its links")
 		}
-
-		return running
 	}
 }
 
@@ -167,6 +172,14 @@ func TestTheHostsOwnLinks(t *testing.T) {
 				t.Errorf("a link of family %d on %s at %s", at.family, link.Interface().Name, addr)
 			}
 		}
+	}
+
+	// That was all of them: the next look, two seconds later, finds no
+	// link that was there and not told of.
+	select {
+	case event := <-running.later:
+		t.Errorf("told of a link on %s after the host said that was all", event.Link.Interface().Name)
+	case <-time.After(2500 * time.Millisecond):
 	}
 
 	running.stop()

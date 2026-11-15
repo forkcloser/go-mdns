@@ -60,17 +60,19 @@ const MaxPacket = 9000
 
 // Network is a host's links, as they come and go.
 type Network interface {
-	// Watch tells handle first every link there is, each as up, and then
-	// every link that comes up, changes its addresses or goes down, for
-	// as long as ctx lasts. Events come one at a time. It returns ctx's
-	// error when ctx ends, or sooner with why the links can no longer be
-	// told of.
+	// Watch tells handle first every link there is, each as up, then
+	// that this is all of them, as Settled, once; and then every link
+	// that comes up, changes its addresses or goes down, for as long as
+	// ctx lasts. Events come one at a time. It returns ctx's error when
+	// ctx ends, or sooner with why the links can no longer be told of.
 	Watch(ctx context.Context, handle func(Event)) error
 }
 
-// Event is a link come up, changed or gone down.
+// Event is a link come up, changed or gone down; or, with no link, the
+// word that every link there was has been told of.
 type Event struct {
 	// Link is the link. Once it is told of as down it has been closed.
+	// There is none with Settled.
 	Link Link
 	// Change is what happened to it.
 	Change Change
@@ -87,6 +89,10 @@ const (
 	Changed
 	// Down: the link is gone.
 	Down
+	// Settled: every link there was when Watch began has been told of.
+	// What is opened on a Network waits for this, so that what is asked
+	// of it first is asked on the links there are, and not on none.
+	Settled
 )
 
 // Link is one interface of the host, for one family: where Multicast DNS

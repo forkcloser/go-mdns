@@ -76,13 +76,15 @@ func (system) Watch(ctx context.Context, handle func(Event)) error {
 	look := time.NewTicker(every)
 	defer look.Stop()
 
-	for {
-		watched.look()
+	watched.look()
+	handle(Event{Change: Settled})
 
+	for {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("watching the host's links: %w", context.Cause(ctx))
 		case <-look.C:
+			watched.look()
 		}
 	}
 }

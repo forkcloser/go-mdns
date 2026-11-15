@@ -406,3 +406,39 @@ func TestHowLongARecordIsRememberedByDefault(t *testing.T) {
 		}
 	})
 }
+
+// errNoSocket is why a network of a test cannot be watched.
+var errNoSocket = errors.New("no socket on the port")
+
+// unwatched is a Network that cannot be watched: it gives up at once
+// with what it is given, or says nothing for as long as it is let.
+type unwatched struct{ gives error }
+
+func (u unwatched) Watch(ctx context.Context, _ func(transport.Event)) error {
+	if u.gives != nil {
+		return u.gives
+	}
+
+	<-ctx.Done()
+
+	return ctx.Err()
+}
+
+// A Peer that cannot be opened for what the network is says so as it
+// is: nothing that was asked of it was invalid.
+func TestAPeerOnANetworkThatCannotBeWatched(t *testing.T) {
+	t.Parallel()
+
+	_, err := mdns.Open(t.Context(), mdns.Config{Network: unwatched{gives: errNoSocket}})
+	if !errors.Is(err, errNoSocket) || errors.Is(err, mdns.ErrInvalid) {
+		t.Errorf("on a network that cannot be watched: %v", err)
+	}
+
+	ctx, stop := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer stop()
+
+	_, err = mdns.Open(ctx, mdns.Config{Network: unwatched{}})
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, mdns.ErrInvalid) {
+		t.Errorf("on a network that never says what links it has: %v", err)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/forkcloser/go-mdns/internal/wire"
@@ -45,7 +46,9 @@ type Config struct {
 type Engine struct {
 	cfg  Config
 	stop context.CancelFunc
+	// settled is closed when the links there were at first are known;
 	// quit is closed to end the loop, and done when it has ended.
+	settled chan struct{}
 	quit    chan struct{}
 	done    chan struct{}
 	calls   chan func()
@@ -54,6 +57,7 @@ type Engine struct {
 	// running is the watch and the readers.
 	running sync.WaitGroup
 	closing sync.Once
+	first   sync.Once
 
 	// What follows is the loop's.
 	now    time.Time
@@ -78,18 +82,22 @@ type arrival struct {
 	group   bool
 }
 
-// Open starts an Engine on a network. It ends with Close, and not with
-// ctx, which is only what its goroutines inherit.
+// Open starts an Engine on a network, and returns once it knows the
+// links there are. ctx bounds that wait alone: the Engine ends with
+// Close.
 func Open(ctx context.Context, cfg Config) (*Engine, error) {
 	if cfg.Network == nil {
 		return nil, fmt.Errorf("%w: no network to be on", ErrInvalid)
 	}
+
+	waiting := ctx
 
 	ctx, stop := context.WithCancel(context.WithoutCancel(ctx))
 	opened := &Engine{
 		cfg:     cfg,
 		stop:    stop,
 		quit:    make(chan struct{}),
+		settled: make(chan struct{}),
 		done:    make(chan struct{}),
 		calls:   make(chan func()),
 		events:  make(chan transport.Event),
@@ -99,21 +107,53 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		named:   map[string][]*asking{},
 	}
 
+	// Watch ends with the Engine, or sooner with why: before the links
+	// were told of that is Open's to say, after it the log's. Which it
+	// is goes by whether Settled was handed over, not by whether the
+	// loop has taken it in yet: Open is on its way out by then.
+	failed := make(chan error, 1)
+
+	var told atomic.Bool
+
 	opened.running.Go(func() {
 		err := cfg.Network.Watch(ctx, func(event transport.Event) {
 			select {
 			case opened.events <- event:
+				if event.Change == transport.Settled {
+					told.Store(true)
+				}
 			case <-ctx.Done():
 			}
 		})
-		if ctx.Err() == nil {
-			slog.ErrorContext(ctx, "the links can no longer be told of", "error", err)
+		if ctx.Err() != nil {
+			return
 		}
+
+		if told.Load() {
+			slog.ErrorContext(ctx, "the links can no longer be told of", "error", err)
+
+			return
+		}
+
+		failed <- err
 	})
 
 	go opened.loop()
 
-	return opened, nil
+	// Not before the links are known: what is asked of the Engine first
+	// is then asked on them, and not on none.
+	select {
+	case <-opened.settled:
+		return opened, nil
+	case err := <-failed:
+		_ = opened.Close()
+
+		return nil, fmt.Errorf("watching the network: %w", err)
+	case <-waiting.Done():
+		_ = opened.Close()
+
+		return nil, fmt.Errorf("opening on the network: %w", context.Cause(waiting))
+	}
 }
 
 // Close leaves the network and returns when everything the Engine

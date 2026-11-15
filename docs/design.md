@@ -53,7 +53,8 @@ is declared below and not built.
    stands; a change says what it is and carries the whole again. A watcher is first told
    everything already known, so there is no reading first and watching after.
 6. **Open, or not at all; the zero value works.** `Open` returns a Peer that works, or an
-   error. The zero `Config` is every interface, both families, the host's own name. A
+   error: it has been told of every link there is, so that what is announced or asked
+   first is announced and asked on them, and not on none. The zero `Config` is every interface, both families, the host's own name. A
    host with no network is not an error: links are taken up as they come.
 7. **Names are not strings.** A domain name is its labels. An instance called
    "Living Room 2.4GHz" is one label with a dot in it, and no escaping stands between a
