@@ -2,9 +2,13 @@ package mdns
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/netip"
+	"time"
 
-	"github.com/forkcloser/go-mdns/internal/todo"
+	"github.com/forkcloser/go-mdns/internal/engine"
+	"github.com/forkcloser/go-mdns/internal/wire"
 )
 
 // Query says which services to look for.
@@ -122,7 +126,7 @@ func (c Change) String() string {
 // It returns ctx's error when ctx ends, ErrClosed when the Peer closes,
 // and ErrInvalid for a query that is not one.
 func (p *Peer) Browse(ctx context.Context, query Query, handle func(Change, Instance)) error {
-	return todo.ImplementMe(p, ctx, query, handle)
+	return p.search(ctx, query, handle)
 }
 
 // Reconfirm tells the Peer that an instance could not be reached where
@@ -131,7 +135,42 @@ func (p *Peer) Browse(ctx context.Context, query Query, handle func(Change, Inst
 // seconds, however long they were said to last: a Browse then tells of
 // it as lost. It returns at once, and ErrClosed from a Peer that is.
 func (p *Peer) Reconfirm(doubted Instance) error {
-	return todo.ImplementMe(p, doubted)
+	service, proto, err := serviceType(doubted.Type)
+	if err != nil {
+		return err
+	}
+
+	if err = instanceLabel(doubted.Name); err != nil {
+		return err
+	}
+
+	host, err := hostName(doubted.Host)
+	if err != nil {
+		return err
+	}
+
+	kind := Name{service, proto, local}
+	instance := append(Name{doubted.Name}, kind...)
+
+	records := []wire.Record{
+		{Name: kind, Data: wire.Pointer{Target: instance}},
+		{
+			Name: instance,
+			Data: wire.Service{Priority: doubted.Priority, Weight: doubted.Weight, Port: doubted.Port, Target: host},
+		},
+	}
+
+	for _, addr := range doubted.Addrs {
+		records = append(records, wire.Record{Name: host, Data: wire.Address{Addr: addr.WithZone("")}})
+	}
+
+	for _, record := range records {
+		if err = p.engine.Reconfirm(record); err != nil {
+			return translate(err)
+		}
+	}
+
+	return nil
 }
 
 // Resolve finds the one instance of a name and a type, and returns it
@@ -140,7 +179,28 @@ func (p *Peer) Reconfirm(doubted Instance) error {
 // returns ctx's error: nothing on the network says that an instance is
 // not there.
 func (p *Peer) Resolve(ctx context.Context, name, service string) (Instance, error) {
-	return Instance{}, todo.ImplementMe(p, ctx, name, service)
+	if name == "" {
+		return Instance{}, fmt.Errorf("%w: an instance with no name", ErrInvalid)
+	}
+
+	ctx, found := context.WithCancel(ctx)
+	defer found()
+
+	var resolved *Instance
+
+	err := p.search(ctx, Query{Type: service, Name: name}, func(change Change, instance Instance) {
+		if change != Lost && len(instance.Addrs) > 0 && resolved == nil {
+			resolved = &instance
+
+			found()
+		}
+	})
+
+	if resolved != nil {
+		return *resolved, nil
+	}
+
+	return Instance{}, err
 }
 
 // LookupHost finds where a host is: "printer.local", or "printer". It
@@ -149,8 +209,69 @@ func (p *Peer) Resolve(ctx context.Context, name, service string) (Instance, err
 // both. An IPv6 link-local address carries its zone. It asks until ctx
 // ends, and then returns ctx's error.
 func (p *Peer) LookupHost(ctx context.Context, host string) ([]netip.Addr, error) {
-	return nil, todo.ImplementMe(p, ctx, host)
+	name, err := hostName(host)
+	if err != nil {
+		return nil, err
+	}
+
+	asked := p.engine.Group()
+	defer asked.Close()
+
+	for _, kind := range []uint16{wire.TypeA, wire.TypeAAAA} {
+		if _, err = asked.Add(engine.Question{Name: name, Type: kind}); err != nil {
+			return nil, translate(err)
+		}
+	}
+
+	found := whereabouts{addrs: map[string]engine.Answer{}}
+
+	// Until there is one address; then a moment more, for the others.
+	if err = found.gather(ctx, asked, func() bool { return len(found.order) > 0 }); err != nil {
+		return nil, err
+	}
+
+	more, enough := context.WithTimeout(ctx, moment)
+	defer enough()
+
+	if err = found.gather(
+		more,
+		asked,
+		func() bool { return false },
+	); ctx.Err() != nil ||
+		!errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
+	}
+
+	return found.reached(nil), nil
 }
+
+// gather takes a host's addresses as questions bring them, until there
+// are enough or ctx ends.
+func (w *whereabouts) gather(ctx context.Context, asked *engine.Group, enough func() bool) error {
+	for {
+		told, err := asked.Poll()
+		if err != nil {
+			return translate(err)
+		}
+
+		for _, one := range told {
+			w.take(one.Change, one.Answer)
+		}
+
+		if enough() {
+			return nil
+		}
+
+		if err = asked.Wait(ctx); err != nil {
+			return translate(err)
+		}
+	}
+}
+
+// moment is how long after a host's first address LookupHost waits for
+// the others: those of the other family, which come with it or right
+// after.
+const moment = 100 * time.Millisecond
 
 // ServiceType is a type of service that is announced.
 type ServiceType struct {
@@ -166,5 +287,13 @@ type ServiceType struct {
 // and then each found or lost, until ctx ends. It returns as Browse
 // does.
 func (p *Peer) ServiceTypes(ctx context.Context, handle func(Change, ServiceType)) error {
-	return todo.ImplementMe(p, ctx, handle)
+	enumeration := engine.Question{Name: Name{"_services", "_dns-sd", "_udp", local}, Type: wire.TypePTR}
+
+	return translate(p.engine.Ask(ctx, enumeration, func(change engine.Change, answer engine.Answer) {
+		// Only the two labels of the type count; what follows is the
+		// domain it was asked in.
+		if pointer, ok := answer.Record.Data.(wire.Pointer); ok && len(pointer.Target) > 2 {
+			handle(Change(change), ServiceType{Type: Name(pointer.Target[:2]).String(), Interfaces: answer.Interfaces})
+		}
+	}))
 }

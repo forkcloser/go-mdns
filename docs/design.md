@@ -24,12 +24,13 @@ IPv4 and IPv6, on every interface a host has.
 Examples, compiled with the code: [announcing, announcing for a service that is somewhere
 else, browsing, resolving, asking, and two peers on a wire](../example_test.go).
 
-Built: names, the rules a service and its text record are held to, the reading and
-writing of messages ([`internal/wire`](../internal/wire/wire.go)), the network of tests,
-and records, asked for and answered for: `Open`, `Close`, `Ask`, `ReconfirmRecord` and
-`Publish`, on [`internal/engine`](../internal/engine/engine.go). Every other body
-goes through [`internal/todo`](../internal/todo/todo.go), which prints `IMPLEMENT ME` and
-returns an error; the package goes when the last of them is built.
+Built: everything but the host's own network. Names and the rules a service is held to;
+the reading and writing of messages ([`internal/wire`](../internal/wire/wire.go)); records
+asked for and answered for ([`internal/engine`](../internal/engine/engine.go)); services
+announced and found on them ([`announce.go`](../announce.go), [`browser.go`](../browser.go),
+[`host.go`](../host.go)); and the network of tests. `transport.System` and the command go
+through [`internal/todo`](../internal/todo/todo.go), which prints `IMPLEMENT ME` and
+returns an error: until they are built a Peer is opened on a `Network` it is given.
 
 ## What the API holds itself to
 
