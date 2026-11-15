@@ -229,3 +229,180 @@ func TestWhatAPeerRefuses(t *testing.T) {
 		}
 	}
 }
+
+// Two Peers on a wire: what one publishes the other finds, and loses a
+// second after it is withdrawn; and a name one holds the other cannot
+// take.
+func TestAPeerPublishes(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		open := func(last string) *mdns.Peer {
+			peer, err := mdns.Open(t.Context(), mdns.Config{Network: network.Host(mdnstest.Port{
+				Interface: "en0", Wire: "lan",
+				Addrs: []netip.Prefix{netip.MustParsePrefix("192.0.2." + last + "/24")},
+			})})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			t.Cleanup(func() { _ = peer.Close() })
+
+			return peer
+		}
+
+		one, other := open("1"), open("2")
+
+		synctest.Wait()
+
+		name := mdns.Name{"kitchen", "local"}
+		record := mdns.Record{Name: name, Data: mdns.Addr{Addr: netip.MustParseAddr("192.0.2.1")}}
+
+		heard := make(chan mdns.Change, 4)
+		ended := make(chan error, 1)
+		ctx, stop := context.WithCancel(t.Context())
+
+		go func() {
+			ended <- other.Ask(ctx, mdns.Question{Name: name, Type: mdns.TypeA}, func(change mdns.Change, answer mdns.Answer) {
+				// Two minutes, as RFC 6762 recommends for an address.
+				if answer.Record.TTL != 2*time.Minute || !reflect.DeepEqual(answer.Record.Data, record.Data) {
+					t.Errorf("told of %+v", answer.Record)
+				}
+
+				heard <- change
+			})
+		}()
+
+		published, err := one.Publish(t.Context(), mdns.Records{Records: []mdns.Record{record}})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if change := <-heard; change != mdns.Found {
+			t.Errorf("told %s", change)
+		}
+
+		// The other cannot have the name for another address.
+		taken := mdns.Record{Name: name, Data: mdns.Addr{Addr: netip.MustParseAddr("192.0.2.2")}}
+		if _, err = other.Publish(
+			t.Context(),
+			mdns.Records{Records: []mdns.Record{taken}},
+		); !errors.Is(
+			err,
+			mdns.ErrConflict,
+		) {
+			t.Errorf("a name that is taken: %v", err)
+		}
+
+		// Nor a record that cannot be said.
+		if _, err = other.Publish(
+			t.Context(),
+			mdns.Records{Records: []mdns.Record{{Name: name}}},
+		); !errors.Is(
+			err,
+			mdns.ErrInvalid,
+		) {
+			t.Errorf("a record with no data: %v", err)
+		}
+
+		if published.Err() != nil {
+			t.Errorf("what stands has ended: %v", published.Err())
+		}
+
+		withdrawn := time.Now()
+
+		if err = published.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		<-published.Done()
+
+		if change := <-heard; change != mdns.Lost || time.Since(withdrawn) != time.Second ||
+			!errors.Is(published.Err(), mdns.ErrClosed) {
+			t.Errorf("told %s after %s, ended with %v", change, time.Since(withdrawn), published.Err())
+		}
+
+		// What others may say too is said by both.
+		shared := mdns.Records{
+			Shared:  true,
+			Records: []mdns.Record{{Name: mdns.Name{"_http", "_tcp", "local"}, Data: mdns.PTR{Target: name}}},
+		}
+
+		for _, peer := range []*mdns.Peer{one, other} {
+			if _, err = peer.Publish(t.Context(), shared); err != nil {
+				t.Errorf("what others may say too: %v", err)
+			}
+		}
+
+		stop()
+
+		if err = <-ended; !errors.Is(err, context.Canceled) {
+			t.Errorf("the Ask ended with %v", err)
+		}
+	})
+}
+
+// A record that does not say how long it is to be remembered is given
+// what RFC 6762 section 10 recommends: two minutes when its name is a
+// host's or its data holds a host's name, 75 minutes otherwise.
+func TestHowLongARecordIsRememberedByDefault(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		open := func(last string) *mdns.Peer {
+			peer, err := mdns.Open(t.Context(), mdns.Config{Network: network.Host(mdnstest.Port{
+				Interface: "en0", Wire: "lan",
+				Addrs: []netip.Prefix{netip.MustParsePrefix("192.0.2." + last + "/24")},
+			})})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			t.Cleanup(func() { _ = peer.Close() })
+
+			return peer
+		}
+
+		one, other := open("1"), open("2")
+
+		synctest.Wait()
+
+		host := mdns.Name{"kitchen", "local"}
+		back := mdns.Name{"1", "2", "0", "192", "in-addr", "arpa"}
+		listed := mdns.Name{"_http", "_tcp", "local"}
+
+		for what, row := range map[string]struct {
+			record mdns.Record
+			want   time.Duration
+		}{
+			"an address":                    {mdns.Record{Name: host, Data: mdns.Addr{Addr: netip.MustParseAddr("192.0.2.1")}}, 2 * time.Minute},
+			"where a service is":            {mdns.Record{Name: mdns.Name{"a", "_http", "_tcp", "local"}, Data: mdns.SRV{Port: 80, Target: host}}, 2 * time.Minute},
+			"what a host is":                {mdns.Record{Name: mdns.Name{"described", "local"}, Data: mdns.Raw{Kind: 13, Bytes: []byte("\x03ARM\x05Linux")}}, 2 * time.Minute},
+			"an address back to its host":   {mdns.Record{Name: back, Data: mdns.PTR{Target: host}}, 2 * time.Minute},
+			"what lists a service":          {mdns.Record{Name: listed, Data: mdns.PTR{Target: mdns.Name{"a", "_http", "_tcp", "local"}}}, 75 * time.Minute},
+			"what a service says of itself": {mdns.Record{Name: mdns.Name{"b", "_http", "_tcp", "local"}, Data: mdns.TXT{}}, 75 * time.Minute},
+		} {
+			if _, err := one.Publish(t.Context(), mdns.Records{Records: []mdns.Record{row.record}}); err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+
+			ctx, stop := context.WithCancel(t.Context())
+
+			_ = other.Ask(
+				ctx,
+				mdns.Question{Name: row.record.Name, Type: row.record.Data.Type()},
+				func(_ mdns.Change, answer mdns.Answer) {
+					if answer.Record.TTL != row.want {
+						t.Errorf("%s: good for %s, want %s", what, answer.Record.TTL, row.want)
+					}
+
+					stop()
+				},
+			)
+		}
+	})
+}

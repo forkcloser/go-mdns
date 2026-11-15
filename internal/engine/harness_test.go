@@ -72,10 +72,11 @@ type heard struct {
 	wire.Message
 
 	at time.Time
-	// on is the neighbour's interface it came in on.
-	on string
-	// size is how many bytes it was.
-	size int
+	// on is the neighbour's interface it came in on, group whether it
+	// was said to all, and size how many bytes it was.
+	on    string
+	group bool
+	size  int
 }
 
 // neighbour is another host on the network, speaking for itself: what
@@ -113,13 +114,13 @@ func join(t *testing.T, network *mdnstest.Network, ports ...mdnstest.Port) *neig
 			buf := make([]byte, transport.MaxPacket)
 
 			for {
-				size, _, _, err := link.Read(buf)
+				size, _, group, err := link.Read(buf)
 				if err != nil {
 					return
 				}
 
 				if message, err := wire.Parse(buf[:size]); err == nil {
-					joined.heard <- heard{Message: message, at: time.Now(), on: link.Interface().Name, size: size}
+					joined.heard <- heard{Message: message, at: time.Now(), on: link.Interface().Name, group: group, size: size}
 				}
 			}
 		})
@@ -314,4 +315,87 @@ func between(at, since time.Time, least, most time.Duration) bool {
 	gone := at.Sub(since)
 
 	return gone >= least && gone <= most
+}
+
+// drain forgets what the neighbour has heard so far.
+func (n *neighbour) drain() {
+	synctest.Wait()
+
+	for len(n.heard) > 0 {
+		<-n.heard
+	}
+}
+
+// claim asks for a name as a host that means to take it does: with
+// what it would say of it, and for an answer of its own or not.
+func (n *neighbour) claim(t *testing.T, alone bool, proposed ...wire.Record) {
+	t.Helper()
+
+	if len(proposed) == 0 {
+		t.Fatal("a claim with nothing to say")
+	}
+
+	message := wire.NewBuilder(nil, wire.Header{}, wire.Options{})
+
+	if err := message.Question(
+		wire.Question{Name: proposed[0].Name, Type: wire.TypeANY, Class: wire.ClassIN, Unicast: alone},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, record := range proposed {
+		if err := message.Authority(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := n.link(t, "en0").Multicast(message.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// published is a Publish under way, or done.
+type published struct {
+	*engine.Publication
+
+	err error
+	at  time.Time
+}
+
+// publish publishes a set, and says when Publish came back and with
+// what.
+func publish(t *testing.T, on *engine.Engine, set engine.Set) <-chan published {
+	t.Helper()
+
+	done := make(chan published, 1)
+
+	go func() {
+		publication, err := on.Publish(t.Context(), set)
+		done <- published{Publication: publication, err: err, at: time.Now()}
+	}()
+
+	return done
+}
+
+// settled publishes a set and waits until it has been said three times
+// and the link is quiet again.
+func settled(t *testing.T, on *engine.Engine, other *neighbour, set engine.Set) *engine.Publication {
+	t.Helper()
+
+	result := <-publish(t, on, set)
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+
+	time.Sleep(4 * time.Second)
+	other.drain()
+
+	return result.Publication
+}
+
+// unique is a record as a host that holds its name alone says it.
+func unique(record wire.Record) wire.Record {
+	record.Flush = true
+
+	return record
 }

@@ -149,6 +149,27 @@ func (h *Host) Unplug(name string) {
 	h.ports = slices.Delete(h.ports, found, found+1)
 }
 
+// Socket opens a socket at one of the host's addresses, on a port that
+// is not 5353.
+func (h *Host) Socket(local netip.AddrPort) (*Socket, error) {
+	h.network.mu.Lock()
+	defer h.network.mu.Unlock()
+
+	found := slices.IndexFunc(h.ports, func(one *port) bool { return one.has(local.Addr()) })
+	if found < 0 || local.Port() == transport.Port || local.Port() == 0 {
+		return nil, fmt.Errorf(
+			"%w at %s: not an address of the host's, or not a port a resolver asks from",
+			errNoSocket,
+			local,
+		)
+	}
+
+	opened := &Socket{port: h.ports[found], local: local, more: make(chan struct{}, 1), closed: make(chan struct{})}
+	opened.port.sockets = append(opened.port.sockets, opened)
+
+	return opened, nil
+}
+
 // attach is Plug, under the network's lock.
 func (h *Host) attach(wanted Port) {
 	addrs := wanted.Addrs
@@ -268,6 +289,8 @@ type port struct {
 	mtu   int
 	// links is the links open on it, the first to open first.
 	links []*link
+	// sockets is the sockets open on it, on other ports.
+	sockets []*Socket
 }
 
 // open brings a watch's links on the port to what the port now is, under
@@ -425,6 +448,11 @@ func (l *link) Unicast(p []byte, dest netip.AddrPort) error {
 		return fmt.Errorf("sending on %s: %w: %s", l.port.name, errOtherFamily, dest.Addr())
 	}
 
+	// To another port: to the socket that is open there, if one is.
+	if dest.Port() != transport.Port {
+		return l.send(p, false, func(*link) bool { return false }, dest)
+	}
+
 	taken := false
 
 	return l.send(p, false, func(other *link) bool {
@@ -473,8 +501,9 @@ var errOtherFamily = errors.New("an address of the other family")
 var errTooLarge = errors.New("a packet too large")
 
 // send hands a packet to the links on the same wire, of the same family,
-// that are chosen; to none of them when the wire is cut.
-func (l *link) send(p []byte, group bool, chosen func(*link) bool) error {
+// that are chosen, and to the sockets open at the addresses given; to
+// none of them when the wire is cut.
+func (l *link) send(p []byte, group bool, chosen func(*link) bool, sockets ...netip.AddrPort) error {
 	network := l.network()
 
 	network.mu.Lock()
@@ -503,6 +532,12 @@ func (l *link) send(p []byte, group bool, chosen func(*link) bool) error {
 	for _, other := range network.on(l.port.wire, l.family) {
 		if chosen(other) {
 			other.receive(packet{bytes: slices.Clone(p), from: l.source(other.port.name), group: group})
+		}
+	}
+
+	for _, dest := range sockets {
+		if open := network.socket(l.port.wire, dest); open != nil {
+			open.receive(packet{bytes: slices.Clone(p), from: l.source(open.port.name)})
 		}
 	}
 
@@ -568,4 +603,156 @@ func zoned(addr netip.Addr, name string) netip.Addr {
 	}
 
 	return addr
+}
+
+// Socket is a socket of a host on another port than 5353: what a
+// resolver that is not a Multicast DNS one asks from, and is answered
+// at.
+type Socket struct {
+	port  *port
+	local netip.AddrPort
+	// What follows is the network's, under its lock.
+	queue []packet
+	shutd bool
+	more  chan struct{}
+	// closed is closed when the socket is.
+	closed chan struct{}
+}
+
+// errNoSocket is a socket that cannot be opened.
+var errNoSocket = errors.New("no socket")
+
+// Multicast sends p to the group of the socket's family, port 5353.
+func (s *Socket) Multicast(p []byte) error {
+	return s.send(p, true, func(*link) bool { return true })
+}
+
+// Unicast sends p to port 5353 at an address on the socket's wire, and
+// to the first that listens there.
+func (s *Socket) Unicast(p []byte, dest netip.Addr) error {
+	if familyOf(dest) != familyOf(s.local.Addr()) {
+		return fmt.Errorf("sending from %s: %w: %s", s.local, errOtherFamily, dest)
+	}
+
+	taken := false
+
+	return s.send(p, false, func(other *link) bool {
+		if taken || !other.port.has(dest) {
+			return false
+		}
+
+		taken = true
+
+		return true
+	})
+}
+
+// Read waits for the next packet sent to the socket, copies it into p
+// and says who sent it. After Close it returns an error.
+func (s *Socket) Read(p []byte) (int, netip.AddrPort, error) {
+	network := s.port.host.network
+
+	for {
+		network.mu.Lock()
+
+		// A socket that is closed reads nothing, whatever had arrived.
+		if s.shutd {
+			network.mu.Unlock()
+
+			return 0, netip.AddrPort{}, fmt.Errorf("reading at %s: %w", s.local, net.ErrClosed)
+		}
+
+		if len(s.queue) > 0 {
+			next := s.queue[0]
+			s.queue = s.queue[1:]
+
+			if len(s.queue) > 0 {
+				signal(s.more)
+			}
+
+			network.mu.Unlock()
+
+			return copy(p, next.bytes), next.from, nil
+		}
+
+		network.mu.Unlock()
+
+		select {
+		case <-s.closed:
+		case <-s.more:
+		}
+	}
+}
+
+// Close closes the socket. A Read under way returns.
+func (s *Socket) Close() error {
+	network := s.port.host.network
+
+	network.mu.Lock()
+	defer network.mu.Unlock()
+
+	if !s.shutd {
+		s.shutd = true
+		close(s.closed)
+	}
+
+	s.port.sockets = slices.DeleteFunc(s.port.sockets, func(one *Socket) bool { return one == s })
+
+	return nil
+}
+
+func (s *Socket) send(p []byte, group bool, chosen func(*link) bool) error {
+	network := s.port.host.network
+
+	network.mu.Lock()
+	defer network.mu.Unlock()
+
+	if s.shutd {
+		return fmt.Errorf("sending from %s: %w", s.local, net.ErrClosed)
+	}
+
+	if network.cut[s.port.wire] {
+		return nil
+	}
+
+	for _, other := range network.on(s.port.wire, familyOf(s.local.Addr())) {
+		if chosen(other) {
+			from := netip.AddrPortFrom(zoned(s.local.Addr().WithZone(""), other.port.name), s.local.Port())
+			other.receive(packet{bytes: slices.Clone(p), from: from, group: group})
+		}
+	}
+
+	return nil
+}
+
+// receive queues a packet for the socket's reader, under the network's
+// lock.
+func (s *Socket) receive(arrived packet) {
+	if len(s.queue) >= queued {
+		return
+	}
+
+	s.queue = append(s.queue, arrived)
+	signal(s.more)
+}
+
+// socket is the socket open at an address and a port on a wire, under
+// the network's lock.
+func (n *Network) socket(wire string, local netip.AddrPort) *Socket {
+	for _, host := range n.hosts {
+		for _, port := range host.ports {
+			if port.wire != wire {
+				continue
+			}
+
+			for _, open := range port.sockets {
+				if !open.shutd && open.local.Port() == local.Port() &&
+					open.local.Addr().WithZone("") == local.Addr().WithZone("") {
+					return open
+				}
+			}
+		}
+	}
+
+	return nil
 }

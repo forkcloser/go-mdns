@@ -29,6 +29,16 @@ type link struct {
 	// wished is when an answer of our own was last asked for: one sent
 	// to this host alone is taken for two seconds after.
 	wished time.Time
+
+	// standing is what is published on the link; out the records it has
+	// to say to all and when, and replying the timer that says them;
+	// held what waits for the rest of a question cut short, by who asked
+	// it; denials the records that say which types its names have.
+	standing []*standing
+	out      map[*owned]time.Time
+	replying *timer
+	held     map[netip.Addr]*held
+	denials  map[string]*owned
 }
 
 // linked takes a link that came up, changed or went down.
@@ -40,6 +50,7 @@ func (e *Engine) linked(event transport.Event) {
 		e.up(event.Link)
 	case event.Change == transport.Changed && known != nil:
 		known.addrs = event.Link.Addrs()
+		e.readdress(known.iface)
 	case event.Change == transport.Down && known != nil:
 		e.down(known)
 	}
@@ -65,6 +76,16 @@ func (e *Engine) up(arrived transport.Link) {
 
 	e.running.Go(func() { e.read(arrived) })
 
+	// What is published is published here too, and the interface's
+	// other links learn of the addresses this one brings.
+	for _, published := range e.pubs {
+		if published.wants(iface) {
+			e.raise(published, added, false)
+		}
+	}
+
+	e.readdress(iface)
+
 	// What was already asked is asked here too, and may be answered to
 	// this host alone: it has just come, and the link has heard it all
 	// before.
@@ -79,6 +100,23 @@ func (e *Engine) up(arrived transport.Link) {
 func (e *Engine) down(gone *link) {
 	delete(e.links, gone.wire)
 	e.cancel(gone.send)
+	e.cancel(gone.replying)
+
+	for _, waiting := range gone.held {
+		e.cancel(waiting.timer)
+	}
+
+	for _, stood := range gone.standing {
+		e.cancel(stood.timer)
+		delete(stood.pub.stands, gone)
+
+		// A set that waited for this link to hear it waits no more.
+		stood.heard()
+
+		e.told(stood.pub)
+	}
+
+	e.readdress(gone.iface)
 
 	for _, question := range e.asked {
 		if paced := question.paces[gone]; paced != nil {
@@ -118,34 +156,43 @@ const wishedFor = 2 * time.Second
 // receive takes a message a link heard.
 func (e *Engine) receive(arrived arrival) {
 	heard := e.links[arrived.link]
+
+	switch {
 	// A message that is not a plain question or answer, or that says
 	// something went wrong, is not Multicast DNS (RFC 6762 sections
 	// 18.3 and 18.11).
-	if heard == nil || arrived.message.Header.Opcode != 0 || arrived.message.Header.RCode != 0 {
-		return
-	}
-
-	if !arrived.message.Header.Response {
+	case heard == nil || arrived.message.Header.Opcode != 0 || arrived.message.Header.RCode != 0:
+	case !arrived.message.Header.Response:
 		e.overheard(heard, arrived)
-
-		return
-	}
-
+		e.questioned(heard, arrived)
 	// An answer comes from port 5353; and one sent to this host alone
 	// from the link, to a question that asked for it.
-	if arrived.from.Port() != transport.Port {
-		return
+	case arrived.from.Port() != transport.Port:
+	case !arrived.group && (!heard.neighbour(arrived.from.Addr()) || e.now.Sub(heard.wished) > wishedFor):
+	default:
+		e.answered(heard, arrived)
 	}
+}
 
-	if !arrived.group && (!heard.neighbour(arrived.from.Addr()) || e.now.Sub(heard.wished) > wishedFor) {
-		return
-	}
+// answered takes an answer a link heard.
+func (e *Engine) answered(heard *link, arrived arrival) {
+	// Another program on this host, the system's own responder first of
+	// all, speaks from the host's addresses.
+	local := e.ours(arrived.from.Addr().WithZone(""))
 
 	for _, section := range [][]wire.Record{arrived.message.Answers, arrived.message.Authorities, arrived.message.Additionals} {
 		for _, record := range section {
-			if record.Class == wire.ClassIN && record.Type() != wire.TypeOPT {
-				e.learn(heard, record)
+			if record.Class != wire.ClassIN || record.Type() == wire.TypeOPT {
+				continue
 			}
+
+			e.contested(heard, record, local)
+
+			if arrived.group {
+				heard.repeated(record)
+			}
+
+			e.learn(heard, record)
 		}
 	}
 }

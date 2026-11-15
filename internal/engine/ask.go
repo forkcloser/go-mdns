@@ -226,7 +226,7 @@ func (e *Engine) due(asked *asking, via *link) {
 
 	paced.timer = nil
 
-	if e.answered(asked, via) {
+	if e.complete(asked, via) {
 		paced.idle = true
 
 		return
@@ -241,10 +241,10 @@ func (e *Engine) due(asked *asking, via *link) {
 	paced.wait = min(2*paced.wait, askMost)
 }
 
-// answered says whether a link has heard all there is to hear of a
+// complete says whether a link has heard all there is to hear of a
 // question: a record that is its holder's alone, or that its name has
 // no record of the type.
-func (e *Engine) answered(asked *asking, via *link) bool {
+func (e *Engine) complete(asked *asking, via *link) bool {
 	if asked.key.kind == wire.TypeANY {
 		return false
 	}
@@ -280,7 +280,7 @@ func (e *Engine) touched(via *link, key string) {
 	for _, asked := range e.named[key] {
 		asked.tell()
 
-		if paced := asked.paces[via]; paced != nil && paced.idle && !e.answered(asked, via) {
+		if paced := asked.paces[via]; paced != nil && paced.idle && !e.complete(asked, via) {
 			e.pace(asked, via, false)
 		}
 	}
@@ -345,7 +345,7 @@ func (e *Engine) stand(watching *watcher) (map[string]Answer, []string) {
 			continue
 		}
 
-		for _, one := range via.lookup(watching.asking.key.name, watching.asking.key.kind, e.now) {
+		for _, one := range e.answers(via, watching.asking) {
 			ident := string(rune(one.record.Type())) + string(one.raw)
 
 			answer, known := stand[ident]
@@ -364,6 +364,21 @@ func (e *Engine) stand(watching *watcher) (map[string]Answer, []string) {
 	}
 
 	return stand, order
+}
+
+// answers is what answers a question on a link: what was heard there,
+// and what this host answers for itself.
+func (e *Engine) answers(via *link, asked *asking) []*entry {
+	found := via.lookup(asked.key.name, asked.key.kind, e.now)
+
+	for _, mine := range via.matching(asked.question) {
+		// The word that a name has no record of a type is no record.
+		if via.denials[mine.key] != mine {
+			found = append(found, &entry{record: mine.record, raw: mine.raw})
+		}
+	}
+
+	return found
 }
 
 // enqueue puts a question in the next message a link sends, which goes as
@@ -405,6 +420,16 @@ func (l *link) room() int {
 	}
 
 	return mtu - ipv4Headers
+}
+
+// headers is how many bytes of headers a message travels under on the
+// link.
+func (l *link) headers() int {
+	if l.family == transport.IPv6 {
+		return ipv6Headers
+	}
+
+	return ipv4Headers
 }
 
 // send sends the questions a link has to ask, with what it already knows

@@ -551,3 +551,87 @@ func read1(t *testing.T, from, to transport.Link) netip.AddrPort {
 
 	return read(t, to).from
 }
+
+// A resolver that is not a Multicast DNS one asks from another port, and
+// is answered there.
+func TestASocketOnAnotherPort(t *testing.T) {
+	t.Parallel()
+
+	var network mdnstest.Network
+
+	resolver := network.Host(
+		mdnstest.Port{Interface: "en0", Wire: "lan", Addrs: []netip.Prefix{netip.MustParsePrefix("192.0.2.7/24")}},
+	)
+	listener := watch(
+		t,
+		network.Host(
+			mdnstest.Port{Interface: "en0", Wire: "lan", Addrs: []netip.Prefix{netip.MustParsePrefix("192.0.2.8/24")}},
+		),
+	).next(t, transport.Up)
+	local := netip.MustParseAddrPort("192.0.2.7:49152")
+
+	for what, refused := range map[string]netip.AddrPort{
+		"an address that is not the host's": netip.MustParseAddrPort("192.0.2.9:49152"),
+		"the port of Multicast DNS":         netip.MustParseAddrPort("192.0.2.7:5353"),
+		"no port":                           netip.MustParseAddrPort("192.0.2.7:0"),
+	} {
+		if _, err := resolver.Socket(refused); err == nil {
+			t.Errorf("a socket at %s was opened", what)
+		}
+	}
+
+	socket, err := resolver.Socket(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err = socket.Multicast([]byte("to all")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = socket.Unicast([]byte("to one"), netip.MustParseAddr("192.0.2.8")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []packet{{bytes: "to all", from: local, group: true}, {bytes: "to one", from: local}} {
+		if got := read(t, listener); got != want {
+			t.Errorf("read %+v, want %+v", got, want)
+		}
+	}
+
+	// Answered at its port, and nowhere else.
+	for _, dest := range []netip.AddrPort{local, netip.MustParseAddrPort("192.0.2.7:49153")} {
+		if err = listener.Unicast([]byte("answer"), dest); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	buf := make([]byte, transport.MaxPacket)
+
+	size, from, err := socket.Read(buf)
+	if err != nil || string(buf[:size]) != "answer" || from != netip.MustParseAddrPort("192.0.2.8:5353") {
+		t.Errorf("read %q from %s, %v", buf[:size], from, err)
+	}
+
+	// To an address of the other family: nowhere it sends.
+	if err = socket.Unicast([]byte("astray"), netip.MustParseAddr("fe80::8")); err == nil {
+		t.Error("a socket at an IPv4 address sent to an IPv6 one")
+	}
+
+	// Closed, it reads nothing, whatever had arrived.
+	if err = listener.Unicast([]byte("too late"), local); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = socket.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if size, _, err = socket.Read(buf); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("%d bytes were waiting, %v", size, err)
+	}
+
+	if err = socket.Multicast(nil); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("sending from a socket that is closed: %v", err)
+	}
+}

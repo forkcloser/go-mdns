@@ -26,8 +26,8 @@ else, browsing, resolving, asking, and two peers on a wire](../example_test.go).
 
 Built: names, the rules a service and its text record are held to, the reading and
 writing of messages ([`internal/wire`](../internal/wire/wire.go)), the network of tests,
-and asking: `Open`, `Close`, `Ask` and `ReconfirmRecord`, on the links, the cache and the
-questions of [`internal/engine`](../internal/engine/engine.go). Every other body
+and records, asked for and answered for: `Open`, `Close`, `Ask`, `ReconfirmRecord` and
+`Publish`, on [`internal/engine`](../internal/engine/engine.go). Every other body
 goes through [`internal/todo`](../internal/todo/todo.go), which prints `IMPLEMENT ME` and
 returns an error; the package goes when the last of them is built.
 
