@@ -38,8 +38,10 @@ type Announcement struct {
 
 // Announce offers a service on every link the Peer is on, and on each it
 // comes to be on. It first asks, on each link, whether the name is free,
-// as RFC 6762 has it; a name another host holds is put to the service's
-// Rename, and the answer tried. It returns once the service is announced
+// as RFC 6762 has it; a name another host holds, or that this Peer
+// already announces a service of the same type under on an interface
+// this one is wanted on, is put to the service's Rename, and the
+// answer tried. It returns once the service is announced
 // on the links there are, under the name it ended with, which Name
 // gives; or with ErrConflict when Rename gave up, ErrInvalid for a
 // service that does not validate, or ctx's error, the service then

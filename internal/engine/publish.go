@@ -101,7 +101,10 @@ const defaultHostTTL = 120
 // that come up later included. It returns once the set has been said
 // on each link there is: after the names that are to be this host's
 // alone were asked for and no one had them, which takes about a
-// second. It is ErrConflict when another host holds one, ErrInvalid
+// second. It is ErrConflict when another host holds one; and when
+// another set published here has a record of the same name and type
+// as this host's alone on a link this one wants, which is said at
+// once, or later, when such a link comes up, by Done; ErrInvalid
 // for a set that cannot be said, ctx's error when ctx ends first.
 func (e *Engine) Publish(ctx context.Context, set Set) (*Publication, error) {
 	if err := set.check(); err != nil {
@@ -221,6 +224,11 @@ func (e *Engine) start(published *Publication) {
 	}
 
 	for _, via := range wanted {
+		// Ended on a link before this one: one this host has already.
+		if published.ended() {
+			return
+		}
+
 		e.raise(published, via, true)
 	}
 }
@@ -231,10 +239,38 @@ func (e *Engine) start(published *Publication) {
 func (e *Engine) raise(published *Publication, via *link, initial bool) {
 	raised := &standing{pub: published, link: via, initial: initial}
 	raised.records = e.resolve(raised)
+
+	// A record that is to be this host's alone, of a name and a type
+	// another set already has as such on this link, is taken as one
+	// another host holds: asked for, no one would answer, and two sets
+	// would then answer one question, each with its own.
+	if raised.held() {
+		e.end(published, ErrConflict)
+
+		return
+	}
+
 	published.stands[via] = raised
 	via.standing = append(via.standing, raised)
 
 	e.claim(raised)
+}
+
+// held says whether a record a standing wants for this host alone is
+// one another Publication has as such on the same link: the same name
+// and the same type.
+func (raised *standing) held() bool {
+	for _, other := range raised.link.standing {
+		for _, wanted := range raised.records {
+			if wanted.unique() && slices.ContainsFunc(other.records, func(has *owned) bool {
+				return has.unique() && has.key == wanted.key && has.record.Type() == wanted.record.Type()
+			}) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // resolve is a Publication's records as they are on a link: its own,

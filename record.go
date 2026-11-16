@@ -175,7 +175,9 @@ type Publication struct {
 // Publish answers for a set of records on every link the Peer is on, as
 // Announce does for a service: names that are the host's alone are
 // first asked for, and a name another host holds is ErrConflict, there
-// being no one name to try in its place. It is what Announce is made
+// being no one name to try in its place; so is a record of a name and a
+// type the Peer already has as the host's alone on an interface these
+// are wanted on, a service's and the host's own addresses included. It is what Announce is made
 // of, and is there for what it has no word for.
 func (p *Peer) Publish(ctx context.Context, records Records) (*Publication, error) {
 	set := engine.Set{Interfaces: records.Interfaces}

@@ -86,7 +86,9 @@ func (e *Engine) up(arrived transport.Link) {
 
 	// What is published is published here too, and the interface's
 	// other links learn of the addresses this one brings.
-	for _, published := range e.pubs {
+	// Over a copy: a set that is refused the link ends, and what is
+	// published changes under the loop. No other set ends for it.
+	for _, published := range slices.Clone(e.pubs) {
 		if published.wants(iface) {
 			e.raise(published, added, false)
 		}
