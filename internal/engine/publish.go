@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/forkcloser/go-mdns/internal/wire"
@@ -191,7 +192,9 @@ func (p *Publication) Err() error {
 // Update changes what the records say: the neighbours are told of what
 // is new, and goodbye for what is no more. The names that are this
 // host's alone stay the ones it asked for; a set with another is
-// ErrInvalid. Changes that come faster than ten a minute are said
+// ErrInvalid, and one with a record of a type another set published
+// here has under such a name is ErrConflict, the set left as it was.
+// Changes that come faster than ten a minute are said
 // together, as RFC 6762 section 8.4 asks.
 func (p *Publication) Update(records []wire.Record) error {
 	next := p.set
@@ -264,17 +267,85 @@ func (e *Engine) raise(published *Publication, via *link, initial bool) {
 // one another Publication has as such on the same link: the same name
 // and the same type.
 func (raised *standing) held() bool {
-	for _, other := range raised.link.standing {
-		for _, wanted := range raised.records {
-			if wanted.unique() && slices.ContainsFunc(other.records, func(has *owned) bool {
-				return has.unique() && has.key == wanted.key && has.record.Type() == wanted.record.Type()
-			}) {
-				return true
+	return slices.ContainsFunc(raised.records, func(wanted *owned) bool {
+		return wanted.unique() && raised.link.holds(raised, wanted.key, wanted.record.Type())
+	})
+}
+
+// contended settles a host's standing whose records, brought up to the
+// interface's addresses, now include one another set holds on the link.
+// It says whether the standing is the one that ended, its records put
+// back as they were so that nothing of the address is said for it.
+func (e *Engine) contended(stood *standing, before []*owned) bool {
+	for rival := stood.rival(); rival != nil; rival = stood.rival() {
+		if e.second(stood.pub, rival.pub) {
+			stood.records = before
+			e.end(stood.pub, ErrConflict)
+
+			return true
+		}
+
+		e.end(rival.pub, ErrConflict)
+	}
+
+	return false
+}
+
+// taken says whether one of the records a Publication would say is of a
+// name and a type another has as this host's alone, on a link both
+// stand on, and which name.
+func (p *Publication) taken(records []wire.Record) ([]string, bool) {
+	for _, stood := range p.stands {
+		for _, record := range records {
+			if record.Flush && stood.link.holds(stood, nameKey(record.Name), record.Type()) {
+				return record.Name, true
 			}
 		}
 	}
 
-	return false
+	return nil, false
+}
+
+// holds says whether a standing on the link, other than one, has a
+// record of a name and a type as this host's alone.
+func (l *link) holds(but *standing, key string, kind uint16) bool {
+	return l.holder(but, key, kind) != nil
+}
+
+// holder is the standing on the link, other than one, that has a record
+// of a name and a type as this host's alone; or none.
+func (l *link) holder(but *standing, key string, kind uint16) *standing {
+	found := slices.IndexFunc(l.standing, func(other *standing) bool {
+		return other != but && slices.ContainsFunc(other.records, func(has *owned) bool {
+			return has.unique() && has.key == key && has.record.Type() == kind
+		})
+	})
+	if found < 0 {
+		return nil
+	}
+
+	return l.standing[found]
+}
+
+// rival is a standing on the same link that has, as this host's alone,
+// a record of a name and a type this one has as such too; or none.
+func (raised *standing) rival() *standing {
+	for _, wanted := range raised.records {
+		if !wanted.unique() {
+			continue
+		}
+
+		if other := raised.link.holder(raised, wanted.key, wanted.record.Type()); other != nil {
+			return other
+		}
+	}
+
+	return nil
+}
+
+// second says whether a Publication was published after another.
+func (e *Engine) second(one, other *Publication) bool {
+	return slices.Index(e.pubs, one) > slices.Index(e.pubs, other)
 }
 
 // resolve is a Publication's records as they are on a link: its own,
@@ -351,35 +422,50 @@ func (e *Engine) readdress(iface transport.Interface) {
 			continue
 		}
 
-		for _, stood := range via.standing {
-			if stood.pub.set.Host == nil {
-				continue
+		// Over a copy: a set that loses a record here ends, and one that
+		// ended is not a host to bring up to anything.
+		for _, stood := range slices.Clone(via.standing) {
+			if stood.pub.set.Host != nil && !stood.pub.ended() {
+				e.readdressed(stood)
 			}
-
-			before := stood.records
-			stood.records = e.resolve(stood)
-			forget(stood, before)
-
-			if !stood.live || slices.Equal(before, stood.records) {
-				continue
-			}
-
-			// An address that went with others of its family left is
-			// taken back by what is said of those; one that was the last
-			// of its family has nothing to take it back, and is said
-			// goodbye to (RFC 6762 section 10.1).
-			last := slices.DeleteFunc(slices.Clone(before), func(old *owned) bool {
-				return slices.ContainsFunc(stood.records, func(now *owned) bool {
-					return now.key == old.key && now.record.Type() == old.record.Type()
-				})
-			})
-
-			via.respond(last, true)
-			e.announce(stood)
 		}
 
 		via.denials = nil
 	}
+}
+
+// readdressed brings a host's standing to the addresses its interface
+// now has.
+func (e *Engine) readdressed(stood *standing) {
+	before := stood.records
+	stood.records = e.resolve(stood)
+
+	// An address the host gains may be of a type another set holds under
+	// its name here, with no link having come up to tell: the set
+	// published second ends, as it would have had the address been there
+	// when it was published.
+	if e.contended(stood, before) {
+		return
+	}
+
+	forget(stood, before)
+
+	if !stood.live || slices.Equal(before, stood.records) {
+		return
+	}
+
+	// An address that went with others of its family left is taken back
+	// by what is said of those; one that was the last of its family has
+	// nothing to take it back, and is said goodbye to (RFC 6762 section
+	// 10.1).
+	last := slices.DeleteFunc(slices.Clone(before), func(old *owned) bool {
+		return slices.ContainsFunc(stood.records, func(now *owned) bool {
+			return now.key == old.key && now.record.Type() == old.record.Type()
+		})
+	})
+
+	stood.link.respond(last, true)
+	e.announce(stood)
 }
 
 // forget takes from what a link has to say the records a standing no
@@ -409,6 +495,12 @@ func (e *Engine) update(published *Publication, records []wire.Record) error {
 		if record.Flush && !held(nameKey(record.Name)) {
 			return fmt.Errorf("%w: %q was not asked for when the set was published", ErrInvalid, record.Name)
 		}
+	}
+
+	// Taken as it would have been when the set was published; and the
+	// set stays as it was.
+	if name, taken := published.taken(records); taken {
+		return fmt.Errorf("%w: %q is already published here", ErrConflict, strings.Join(name, "."))
 	}
 
 	published.set.Records = records

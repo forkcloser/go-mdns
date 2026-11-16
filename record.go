@@ -248,7 +248,11 @@ func (b *Publication) Close() error {
 }
 
 // Done is closed when the records are no longer published: withdrawn,
-// or lost to another host that holds one of their names.
+// or lost. They are lost to another host that holds one of their names;
+// and, long after they were published, to this Peer's own host when an
+// interface comes up or gains an address that makes one of them a
+// record the host already says there, whichever of the two was
+// published first keeping it.
 func (b *Publication) Done() <-chan struct{} {
 	return b.published.Done()
 }
