@@ -29,8 +29,8 @@ writing of messages ([`internal/wire`](../internal/wire/wire.go)); records asked
 answered for ([`internal/engine`](../internal/engine/engine.go)); services announced and
 found on them ([`announce.go`](../announce.go), [`browser.go`](../browser.go),
 [`host.go`](../host.go)); the host's own network
-([`transport/system.go`](../transport/system.go)); and the network of tests. The command
-is declared below and not built.
+([`transport/system.go`](../transport/system.go)); the network of tests; and the command
+([`cmd/mdns`](../cmd/mdns/main.go)).
 
 ## What the API holds itself to
 
@@ -173,23 +173,26 @@ offers through one Peer:
 - **A field it does not know is an error**, with where it is: a misspelt `"prot"` that
   announces port zero is worse than a refusal.
 - **What it says is JSON too**, one object on a line on standard output for each thing
-  that happens: a service announced, with the name it ended up with and the name asked
-  for; one renamed later; one lost to another host. What goes wrong goes to standard
-  error.
+  that happens, with its `event`: a service `announced`, with the `name` it has and the
+  name `asked` for; `renamed`, when its name was taken and it tries another; `lost` to
+  another host for good; and `host`, when the host's own name was taken. What goes wrong goes to standard error, and the command
+  ends with 1; asked wrongly, with 2.
 - **It announces until it is told to stop**, and says goodbye for everything on the way
   out. When a name is taken and `rename` is `false`, it withdraws everything and leaves
   with an error: a host half announced is not what was asked for.
-- **Told to read again (SIGHUP), it applies the difference**: a service that is new is
-  announced, one that is gone is withdrawn, one whose text alone changed is updated, and
-  the others are left alone.
+- **A service written twice is two services**: the second takes another name, as it
+  would were its name another host's, and is said to be `renamed`; with `rename` set to
+  `false` the command leaves, as for any name that is taken. To change what is
+  announced, the command is stopped and started again.
 
 For one service typed by hand, the same fields are flags, and no document is needed:
 `mdns announce --type _http._tcp --port 8080 --name "Kitchen display" --txt path=/`.
 
 `mdns browse`, `mdns resolve` and `mdns lookup` are the same three calls of the library,
-for looking at a network by hand; they print JSON as well. The command is declared here
-and built with the rest. It adds nothing to the library's API, which is what holds the
-API to being enough for it.
+for looking at a network by hand; they print JSON as well. The command is
+[`cmd/mdns`](../cmd/mdns/main.go), on [`internal/command`](../internal/command/command.go).
+It adds nothing to the library's API, which is what holds the API to being enough for
+it.
 
 ## What it promises of the protocol
 

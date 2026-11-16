@@ -31,3 +31,26 @@ err = peer.Browse(ctx, mdns.Query{Type: "_http._tcp"}, func(change mdns.Change, 
 Tests of code that uses it need no network: [`mdnstest`](mdnstest/mdnstest.go) is hosts
 and wires in the test's process, on which Peers find each other as they would on a real
 one, and with `testing/synctest` an hour of the protocol takes no time.
+
+## The command
+
+A service that cannot speak the protocol itself is announced by a program run beside it:
+
+```bash
+go install github.com/forkcloser/go-mdns/cmd/mdns@latest
+```
+
+```bash
+mdns announce --type _http._tcp --port 8080 --name "Kitchen display" --txt path=/
+```
+
+or, for everything a host offers at once, from a JSON document
+([the design](docs/design.md#the-command) has its fields):
+
+```bash
+mdns announce services.json
+```
+
+It announces until it is told to stop, and says what happens as JSON on standard output.
+`mdns browse`, `mdns resolve` and `mdns lookup` look
+at a network by hand.

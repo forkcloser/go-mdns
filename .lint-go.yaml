@@ -12,3 +12,10 @@ golangci:
         - path: example_test\.go
           linters:
             - testableexamples
+
+# mdns is installed with `go install`, from the tree: no release builds a
+# binary of it yet. It moves to .release-go.yaml's builds the day one
+# does, which is a decision this file does not make.
+commands:
+  unshipped:
+    - ./cmd/mdns
