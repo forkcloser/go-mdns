@@ -32,6 +32,23 @@ Tests of code that uses it need no network: [`mdnstest`](mdnstest/mdnstest.go) i
 and wires in the test's process, on which Peers find each other as they would on a real
 one, and with `testing/synctest` an hour of the protocol takes no time.
 
+## What is proven, and where
+
+Nearly all of the tests run on `mdnstest`, on every platform. Two go through the
+system's own sockets, with two programs on one host hearing each other and a service
+announced and found; where they run decides what is proven of each system's transport:
+
+| System | The two tests on real sockets |
+|--------|-------------------------------|
+| Linux | Run in continuous integration, on x86-64 and arm64. |
+| Windows | Run in continuous integration, on x86-64 and arm64. |
+| macOS | Not run in continuous integration: GitHub's macOS runners keep a program off the local network ([runner-images#10924](https://github.com/actions/runner-images/issues/10924)), and the tests skip there. Run by hand in a terminal on a Mac, where they pass. |
+
+So a change to the macOS transport is not held by continuous integration: run
+`just test` on a Mac before trusting it. What the library does not do yet, and has not
+been measured against, is [in the tracker](docs/design.md#still-to-settle): among it,
+no run of a conformance suite.
+
 ## The command
 
 A service that cannot speak the protocol itself is announced by a program run beside it:
