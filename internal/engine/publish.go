@@ -155,7 +155,11 @@ func (s *Set) check() error {
 		}
 	}
 
-	if s.Host != nil && (len(s.Host) == 0 || trial.Question(wire.Question{Name: s.Host}) != nil) {
+	// Tried in a message of its own: a question does not follow answers
+	// in one, and a set may have both records and a host.
+	named := wire.NewBuilder(nil, wire.Header{}, wire.Options{})
+
+	if s.Host != nil && (len(s.Host) == 0 || named.Question(wire.Question{Name: s.Host}) != nil) {
 		return fmt.Errorf("%w: a host named %q", ErrInvalid, s.Host)
 	}
 

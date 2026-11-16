@@ -897,3 +897,38 @@ func TestATextRecordInDoubt(t *testing.T) {
 		}
 	})
 }
+
+// A set may have records and a host both: the host adds its addresses
+// to what the set says, and all of it is said together.
+func TestASetOfRecordsAndAHost(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var wires mdnstest.Network
+
+		opened := open(t, engine.Config{Network: wires.Host(port("en0", lan, 1))})
+		other := join(t, &wires, port("en0", lan, 9))
+
+		if _, err := opened.Publish(
+			t.Context(),
+			engine.Set{Host: hostName(), Records: []wire.Record{pointer("Kitchen", 120)}},
+		); err != nil {
+			t.Fatalf("a set of records and a host: %v", err)
+		}
+
+		time.Sleep(5 * time.Second)
+		synctest.Wait()
+
+		said := map[uint16]bool{}
+
+		for len(other.heard) > 0 {
+			for _, answer := range (<-other.heard).Answers {
+				said[answer.Type()] = true
+			}
+		}
+
+		if !said[wire.TypeA] || !said[wire.TypePTR] {
+			t.Errorf("said the types %v", said)
+		}
+	})
+}
