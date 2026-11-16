@@ -266,7 +266,8 @@ is what tells one said to all from one said to this host alone.
   and the system's responder has its own way with them.
 - **How they are watched.** The interfaces are looked at every two seconds, which is the
   longest a link that comes, goes or changes its addresses goes untold. Each system has
-  a way to be told instead; none is used yet.
+  a way to be told instead (netlink, a routing socket, `NotifyIpInterfaceChange`); looking
+  is one code path for the three, and stays until two seconds is shown to be too long.
 - **What a link sent comes back to it**, since the system hands it to every socket on
   the port so that other programs on the host hear it. A link knows its own by the
   address and the bytes, for two seconds, and does not read it.
@@ -289,20 +290,15 @@ is then opened on a `Network` of the program's own.
 
 ## Still to settle
 
-1. **Unicast answers beside a system responder.** Two programs on one port: the system
-   hands a packet sent to the host alone to one of them. RFC 6762 §15.1 has the others detect that and stop asking for unicast answers;
-   `transport.System` does not tell yet, so an answer asked for that way may go to the
-   system's responder and be asked for again.
-2. **Being told of interfaces, not looking.** Netlink on Linux, a routing socket on
-   macOS, `NotifyIpInterfaceChange` on Windows, in place of the look every two seconds.
-3. **Conformance.** Apple's Bonjour Conformance Test is the one real suite, runs on a
-   Mac against a device on the network, and is closed. A harness for it, and
-   interoperation with Avahi and Apple's responder in continuous integration, are what
-   "the spec, whole" will be measured by.
-4. **IPv6 addresses worth announcing.** Which of an interface's the default leaves out:
-   a temporary address cannot be told from another on every system.
-5. **A probe too large for one packet.** The names a set asks for go out in one message
-   with what it means to say of them; a set whose records do not fit one is not split.
+What is known not to be done is in the tracker, each with what done looks like:
+
+- [Unicast answers beside a system responder](https://github.com/forkcloser/go-mdns/issues/12)
+  (RFC 6762 §15.1).
+- [No conformance run](https://github.com/forkcloser/go-mdns/issues/13) against a
+  reference responder or a test suite.
+- [A probe too large for one packet](https://github.com/forkcloser/go-mdns/issues/14).
+- [Only the wire parser is fuzzed](https://github.com/forkcloser/go-mdns/issues/15).
+- [Which IPv6 addresses are announced](https://github.com/forkcloser/go-mdns/issues/16).
 
 [6762]: https://www.rfc-editor.org/rfc/rfc6762
 [6763]: https://www.rfc-editor.org/rfc/rfc6763
