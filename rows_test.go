@@ -627,6 +627,188 @@ func TestAHostsAddressesAMomentApart(t *testing.T) {
 	})
 }
 
+// A host announced for a service, that another host then says is its
+// own, at another address: the name is that host's now, and this one
+// takes no other for a host it only speaks for. The services announced
+// on it end as a conflict, where they went on as if nothing had
+// happened, found at the other host's address. Announced again, the
+// host is asked for again, and said at the addresses given.
+func TestAHostAnnouncedForAServiceIsLost(t *testing.T) {
+	t.Parallel()
+
+	camera, theirs := camera(), theirGarden()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		kitchen := peer(t, &network, "kitchen", wired("en0", "lan", "1"))
+		browser := peer(t, &network, "browser", wired("en0", "lan", "2"))
+		other := stationed(t, &network, wired("en0", "lan", "9"))
+		found := browse(t, browser, mdns.Query{Type: "_http._tcp"})
+
+		low := camera
+		low.Name, low.Port = "Camera low", 82
+
+		var announced []*mdns.Announcement
+
+		for _, service := range []mdns.Service{camera, low} {
+			one, err := kitchen.Announce(t.Context(), service)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			announced = append(announced, one)
+		}
+
+		time.Sleep(5 * time.Second)
+
+		if got := found.stands(t); len(got) != 2 {
+			t.Fatalf("found %+v, want the two services", got)
+		}
+
+		other.say(t, "en0", theirs)
+		time.Sleep(300 * time.Millisecond)
+		other.say(t, "en0", theirs)
+
+		for _, one := range announced {
+			select {
+			case <-one.Done():
+			case <-time.After(time.Minute):
+				t.Fatalf("%q is still announced a minute after its host's name was lost", one.Name())
+			}
+
+			if err := one.Err(); !errors.Is(err, mdns.ErrConflict) {
+				t.Errorf("%q, its host's name another's: ended with %v, want ErrConflict", one.Name(), err)
+			}
+		}
+
+		time.Sleep(5 * time.Second)
+
+		if got := found.stands(t); len(got) != 0 {
+			t.Errorf("still found, on a host whose name is another's: %+v", got)
+		}
+
+		// No one answers for the name when it is asked for again: the
+		// other host said it, and does not defend it.
+		if _, err := kitchen.Announce(t.Context(), camera); err != nil {
+			t.Fatalf("announced again: %v", err)
+		}
+
+		time.Sleep(5 * time.Second)
+
+		if got := found.stands(t)["Camera"]; !reflect.DeepEqual(got.Addrs, camera.Addrs) {
+			t.Errorf("announced again, and found at %v; want the addresses given, %v", got.Addrs, camera.Addrs)
+		}
+	})
+}
+
+// camera is a service on a host that is not the one announcing it, and
+// theirGarden what another host says that has that host's name.
+func camera() mdns.Service {
+	return mdns.Service{
+		Name: "Camera", Type: "_http._tcp", Port: 81, Host: "garden",
+		Addrs: []netip.Addr{netip.MustParseAddr("192.0.2.40")},
+	}
+}
+
+func theirGarden() wire.Record {
+	return of([]string{"garden", "local"}, 120, true, wire.Address{Addr: netip.MustParseAddr("192.0.2.9")})
+}
+
+// A Peer that closes ends a service on another host as closed: that
+// host's name is no longer announced, and was not lost.
+func TestAPeerClosedWithAServiceOnAnotherHost(t *testing.T) {
+	t.Parallel()
+
+	// The service's own records and its host's end together, and either
+	// may be seen first: one round may miss what twenty do not.
+	for range 20 {
+		synctest.Test(t, func(t *testing.T) {
+			var network mdnstest.Network
+
+			kitchen := peer(t, &network, "kitchen", wired("en0", "lan", "1"))
+
+			announced, err := kitchen.Announce(t.Context(), camera())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			time.Sleep(5 * time.Second)
+
+			if err = kitchen.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			<-announced.Done()
+
+			if err = announced.Err(); !errors.Is(err, mdns.ErrClosed) {
+				t.Errorf("ended with %v, want ErrClosed", err)
+			}
+		})
+	}
+}
+
+// And lost while a second service on it asks for its own name: that
+// service is not announced, and nothing is said of it.
+func TestAHostLostWhileAServiceOnItIsAnnounced(t *testing.T) {
+	t.Parallel()
+
+	camera, theirs := camera(), theirGarden()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		kitchen := peer(t, &network, "kitchen", wired("en0", "lan", "1"))
+		other := stationed(t, &network, wired("en0", "lan", "9"))
+
+		if _, err := kitchen.Announce(t.Context(), camera); err != nil {
+			t.Fatal(err)
+		}
+
+		time.Sleep(5 * time.Second)
+		synctest.Wait()
+
+		// What was said of the first service is not what is looked for.
+		for len(other.told) > 0 {
+			<-other.told
+		}
+
+		low := camera
+		low.Name, low.Port = "Camera low", 82
+
+		late := make(chan error, 1)
+
+		go func() {
+			_, err := kitchen.Announce(t.Context(), low)
+			late <- err
+		}()
+
+		time.Sleep(100 * time.Millisecond)
+		other.say(t, "en0", theirs)
+		time.Sleep(300 * time.Millisecond)
+		other.say(t, "en0", theirs)
+
+		select {
+		case err := <-late:
+			if !errors.Is(err, mdns.ErrConflict) {
+				t.Errorf("announced on a host whose name was lost meanwhile: %v, want ErrConflict", err)
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("Announce on a host whose name was lost meanwhile has not come back a minute later")
+		}
+
+		time.Sleep(5 * time.Second)
+		synctest.Wait()
+
+		for len(other.told) > 0 {
+			record := <-other.told
+			if _, is := record.Data.(wire.Service); is && record.TTL > 0 && record.Name[0] == "Camera low" {
+				t.Error("the service was said to be on the host whose name was lost")
+			}
+		}
+	})
+}
+
 // A service announced while the host is losing its name is pointed at
 // the name the host ends up with, whichever of the two comes first.
 func TestAServiceAnnouncedAsTheHostIsRenamed(t *testing.T) {
@@ -827,42 +1009,46 @@ func TestAPeerClosedWhileAServiceIsAnnounced(t *testing.T) {
 		t.Run(what, func(t *testing.T) {
 			t.Parallel()
 
-			synctest.Test(t, func(t *testing.T) {
-				var network mdnstest.Network
+			// The asking's end and the Peer's are two signals, and either
+			// may be seen first: one round may miss what twenty do not.
+			for range 20 {
+				synctest.Test(t, func(t *testing.T) {
+					var network mdnstest.Network
 
-				kitchen := peer(t, &network, "kitchen", wired("en0", "lan", "1"))
+					kitchen := peer(t, &network, "kitchen", wired("en0", "lan", "1"))
 
-				// Its host is announced, so that what is asked for when
-				// the Peer closes is the service's own name.
-				first := service
-				first.Name = "First"
+					// Its host is announced, so that what is asked for when
+					// the Peer closes is the service's own name.
+					first := service
+					first.Name = "First"
 
-				if _, err := kitchen.Announce(t.Context(), first); err != nil {
-					t.Fatal(err)
-				}
-
-				ended := make(chan error, 1)
-
-				go func() {
-					_, err := kitchen.Announce(t.Context(), service)
-					ended <- err
-				}()
-
-				time.Sleep(100 * time.Millisecond)
-
-				if err := kitchen.Close(); err != nil {
-					t.Fatal(err)
-				}
-
-				select {
-				case err := <-ended:
-					if !errors.Is(err, mdns.ErrClosed) {
-						t.Errorf("Announce on a Peer closed meanwhile: %v, want ErrClosed", err)
+					if _, err := kitchen.Announce(t.Context(), first); err != nil {
+						t.Fatal(err)
 					}
-				case <-time.After(time.Minute):
-					t.Error("Announce on a Peer closed meanwhile has not come back a minute later")
-				}
-			})
+
+					ended := make(chan error, 1)
+
+					go func() {
+						_, err := kitchen.Announce(t.Context(), service)
+						ended <- err
+					}()
+
+					time.Sleep(100 * time.Millisecond)
+
+					if err := kitchen.Close(); err != nil {
+						t.Fatal(err)
+					}
+
+					select {
+					case err := <-ended:
+						if !errors.Is(err, mdns.ErrClosed) {
+							t.Errorf("Announce on a Peer closed meanwhile: %v, want ErrClosed", err)
+						}
+					case <-time.After(time.Minute):
+						t.Error("Announce on a Peer closed meanwhile has not come back a minute later")
+					}
+				})
+			}
 		})
 	}
 }

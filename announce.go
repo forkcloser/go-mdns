@@ -293,19 +293,13 @@ func (s *Service) fits(text TXT) error {
 // host has lost and not yet replaced is waited out, and the asking
 // starts over when the host loses its name while the service's is asked
 // for. The lost name is another host's, and a service said to be there
-// sends its users to that host.
+// sends its users to that host. A host that is not this one takes no
+// other name: the service is not announced once its name is lost.
 func (a *Announcement) publish(ctx context.Context) error {
 	for {
-		var held *claim
-
-		if a.elsewhere == nil {
-			var err error
-
-			if held, err = a.peer.settled(ctx); err != nil {
-				return err
-			}
-
-			a.retarget(Name{held.label, local})
+		host, err := a.hosted(ctx)
+		if err != nil {
+			return err
 		}
 
 		a.mu.Lock()
@@ -313,7 +307,7 @@ func (a *Announcement) publish(ctx context.Context) error {
 		built := a.changes
 		a.mu.Unlock()
 
-		asking, done := held.during(ctx)
+		asking, done := during(ctx, host)
 		published, err := a.peer.engine.Publish(asking, set)
 
 		// Looked at before the asking is let go of, which ends it too.
@@ -329,11 +323,36 @@ func (a *Announcement) publish(ctx context.Context) error {
 				return fmt.Errorf("%w: the service %q", ErrConflict, a.Name())
 			}
 		case gone:
-			// The host's name went: again, at its next.
+			// The host's name went: again, at its next if it takes one.
 		default:
 			return translate(err)
 		}
 	}
+}
+
+// hosted is what holds the name of the host the service is on, which the
+// service is pointed at: this host's, once it holds one, or the one
+// announced for it.
+func (a *Announcement) hosted(ctx context.Context) (*engine.Publication, error) {
+	if a.elsewhere != nil {
+		switch err := a.elsewhere.published.Err(); {
+		case errors.Is(err, engine.ErrConflict):
+			return nil, fmt.Errorf("%w: the host of %q", ErrConflict, a.Name())
+		case err != nil:
+			return nil, ErrClosed
+		}
+
+		return a.elsewhere.published, nil
+	}
+
+	held, err := a.peer.settled(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	a.retarget(Name{held.label, local})
+
+	return held.published, nil
 }
 
 // install makes a publication the service's, built when the service
@@ -389,6 +408,10 @@ func (a *Announcement) keep(ctx context.Context) {
 
 		select {
 		case <-published.Done():
+		case <-a.elsewhere.gone():
+			a.end(a.elsewhere.ended())
+
+			return
 		case <-a.done:
 			return
 		}
