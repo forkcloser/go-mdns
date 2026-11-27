@@ -206,7 +206,8 @@ func (Opaque) sealed()  {}
 const (
 	headerSize = 12
 	// maxLabel is the most bytes a label holds, and maxName the most a
-	// name is, its length bytes and the root's included.
+	// name is, its length bytes included and the zero that ends it not:
+	// one more than the DNS has it, as RFC 6762 appendix C does.
 	maxLabel = 63
 	maxName  = 255
 	// maxString is the most bytes a string of a text record holds.

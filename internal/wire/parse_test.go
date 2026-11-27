@@ -50,23 +50,31 @@ func TestWhatIsNotAMessage(t *testing.T) {
 	}
 }
 
-// A name may be no longer than 255 bytes, however it is pieced
-// together with pointers.
+// A name may be no longer than 255 bytes and its zero, however it is
+// pieced together with pointers.
 func TestANameTooLongByItsPointers(t *testing.T) {
 	t.Parallel()
 
 	label := "\x3f" + strings.Repeat("x", 63)
 
-	// Three labels and the root are 193 bytes, and fit; a fourth before a
-	// pointer to them makes 257.
+	// Three labels and the root are 193 bytes, and fit; a label of 62
+	// bytes before a pointer to them makes the 255 and the zero there may
+	// be, and one of 63 a byte too many.
 	fits := header(1) + record(label+label+label+"\x00", 16, "\x00")
 	if _, err := wire.Parse([]byte(fits)); err != nil {
 		t.Fatalf("a name of 193 bytes: %v", err)
 	}
 
+	longest := "\x3e" + strings.Repeat("x", 62)
+
+	whole := header(2) + record(label+label+label+"\x00", 16, "\x00") + record(longest+"\xc0\x0c", 16, "\x00")
+	if read, err := wire.Parse([]byte(whole)); err != nil || len(read.Answers) != 2 {
+		t.Errorf("a name of 255 bytes and its zero: %v", err)
+	}
+
 	packet := header(2) + record(label+label+label+"\x00", 16, "\x00") + record(label+"\xc0\x0c", 16, "\x00")
 	if _, err := wire.Parse([]byte(packet)); !errors.Is(err, wire.ErrMalformed) {
-		t.Errorf("a name of 257 bytes: %v", err)
+		t.Errorf("a name of 256 bytes and its zero: %v", err)
 	}
 }
 

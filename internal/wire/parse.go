@@ -157,7 +157,7 @@ func (r *reader) record() (Record, bool, error) {
 func readName(msg []byte, offset int) ([]string, int, error) {
 	var labels []string
 
-	next, size, before := -1, 1, offset
+	next, size, before := -1, 0, offset
 
 	for {
 		label, target, err := piece(msg, offset, before)

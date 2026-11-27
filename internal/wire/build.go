@@ -413,7 +413,7 @@ func (w *writer) bitmap(types []uint16) {
 
 // checkName holds a name to what DNS can carry.
 func checkName(labels []string) error {
-	size := 1
+	size := 0
 
 	for _, label := range labels {
 		if label == "" || len(label) > maxLabel {

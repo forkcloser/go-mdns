@@ -8,8 +8,8 @@ import (
 
 const (
 	// maxLabel is the most bytes a label holds, and maxName the most a
-	// name does on the wire, each label's length byte and the root's
-	// included.
+	// name does on the wire, each label's length byte included and the
+	// zero that ends it not (RFC 6762 appendix C).
 	maxLabel = 63
 	maxName  = 255
 	// maxByte is the most a "\DDD" escape may say.
@@ -120,13 +120,13 @@ func (n Name) String() string {
 
 // Validate reports a name that cannot be sent, as ErrInvalid: no label,
 // a label that is empty or over 63 bytes, or a name over 255 bytes on
-// the wire.
+// the wire, the zero that ends it not counted.
 func (n Name) Validate() error {
 	if len(n) == 0 {
 		return fmt.Errorf("%w: a name with no label", ErrInvalid)
 	}
 
-	wire := 1
+	wire := 0
 
 	for _, label := range n {
 		switch {

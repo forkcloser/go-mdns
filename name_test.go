@@ -109,21 +109,22 @@ func TestNamesAreWrittenAndCompared(t *testing.T) {
 		}
 	}
 
-	// The longest name there is: 255 bytes on the wire.
+	// The longest name there is: 255 bytes on the wire, and the zero that
+	// ends it (RFC 6762 appendix C).
 	longest := mdns.Name{
 		strings.Repeat("a", 63),
 		strings.Repeat("b", 63),
 		strings.Repeat("c", 63),
-		strings.Repeat("d", 61),
+		strings.Repeat("d", 62),
 	}
 	if err := longest.Validate(); err != nil {
-		t.Errorf("a name of 255 bytes on the wire: %v", err)
+		t.Errorf("a name of 255 bytes on the wire and its zero: %v", err)
 	}
 
 	longest[3] += "d"
 
 	if err := longest.Validate(); !errors.Is(err, mdns.ErrInvalid) {
-		t.Errorf("a name of 256 bytes on the wire: %v", err)
+		t.Errorf("a name of 256 bytes on the wire and its zero: %v", err)
 	}
 
 	if err := (mdns.Name{}).Validate(); !errors.Is(err, mdns.ErrInvalid) {
