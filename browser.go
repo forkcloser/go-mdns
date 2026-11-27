@@ -26,6 +26,10 @@ type browser struct {
 	asked  *engine.Group
 	takers map[int]func(engine.Change, engine.Answer)
 
+	// only is the one instance looked for among those its type lists,
+	// when there is one.
+	only Name
+
 	// instances is the instances heard of, by name, in the order they
 	// were; hosts the hosts their services are on.
 	instances map[string]*sighting
@@ -113,9 +117,13 @@ func (p *Peer) search(ctx context.Context, query Query, handle func(Change, Inst
 
 	defer browsing.asked.Close()
 
-	if names.instance != nil {
+	// An instance looked for by its name is asked for directly. Not when
+	// nothing is asked about instances: it is then found as any is, when
+	// its type lists it.
+	if names.instance != nil && !query.Unresolved {
 		browsing.sight(names.instance, nil, true)
 	} else {
+		browsing.only = names.instance
 		browsing.ask(names.listing, wire.TypePTR, browsing.listed)
 	}
 
@@ -179,6 +187,9 @@ func (b *browser) listed(change engine.Change, answer engine.Answer) {
 	}
 
 	name := Name(pointer.Target)
+	if b.only != nil && !name.Equal(b.only) {
+		return
+	}
 
 	if change == engine.Lost {
 		b.unsight(name)
