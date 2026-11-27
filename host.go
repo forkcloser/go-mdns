@@ -87,20 +87,18 @@ type claim struct {
 	replaced chan struct{}
 }
 
-// during is a context that ends with ctx, and when the name is lost. A
-// service that is on no host of this Peer's has none to lose.
-func (c *claim) during(ctx context.Context) (context.Context, context.CancelFunc) {
+// during is a context that ends with ctx, and when a host's name is no
+// longer held: its publication ended.
+func during(ctx context.Context, host *engine.Publication) (context.Context, context.CancelFunc) {
 	held, stop := context.WithCancel(ctx)
 
-	if c != nil {
-		go func() {
-			select {
-			case <-c.published.Done():
-				stop()
-			case <-held.Done():
-			}
-		}()
-	}
+	go func() {
+		select {
+		case <-host.Done():
+			stop()
+		case <-held.Done():
+		}
+	}()
 
 	return held, stop
 }
@@ -302,6 +300,30 @@ func (p *Peer) borrow(ctx context.Context, service *Service) (*elsewhere, Name, 
 	p.mu.Unlock()
 
 	return known, host, nil
+}
+
+// lost says whether the host's name is another host's now.
+func (e *elsewhere) lost() bool { return errors.Is(e.published.Err(), engine.ErrConflict) }
+
+// ended is why the services on a host that is gone end. One that is not
+// this host takes no other name: the one it had is another host's now,
+// at that host's addresses, or the Peer is closing.
+func (e *elsewhere) ended() error {
+	if e.lost() {
+		return ErrConflict
+	}
+
+	return ErrClosed
+}
+
+// gone is closed when the host is no longer announced, and is never for
+// a service on this host, which has none.
+func (e *elsewhere) gone() <-chan struct{} {
+	if e == nil {
+		return nil
+	}
+
+	return e.published.Done()
 }
 
 // give gives back a host that was announced for a service.
