@@ -130,7 +130,7 @@ func (e *Engine) learn(heard *link, record wire.Record) {
 	case heard.cached >= maxCached && !e.interested(heard, key, kind), heard.cached >= maxHeld:
 		return
 	default:
-		fresh = &entry{raw: raw, late: rand.N(life*refreshLate/percent + 1)} // #nosec G404 -- a delay, not a secret
+		fresh = &entry{raw: raw}
 
 		if heard.cache[key] == nil {
 			heard.cache[key] = map[uint16][]*entry{}
@@ -144,6 +144,9 @@ func (e *Engine) learn(heard *link, record wire.Record) {
 
 	fresh.record, fresh.heard, fresh.life, fresh.expires = record, e.now, life, e.now.Add(life)
 	fresh.asked, fresh.missed, fresh.doubted = 0, 0, time.Time{}
+	// Of the life it was said to have this time: one kept from a longer
+	// life would put every refresh after the end of a shorter.
+	fresh.late = rand.N(life*refreshLate/percent + 1) // #nosec G404 -- a delay, not a secret
 
 	e.soon(fresh.next(e.now, e.interested(heard, key, kind)))
 }

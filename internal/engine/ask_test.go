@@ -132,6 +132,64 @@ func TestARecordIsKeptForAsLongAsItSaid(t *testing.T) {
 	})
 }
 
+// A record said again for less long is asked about again as that life
+// runs out, at 80, 85, 90 and 95% of it, each up to 2% of it late, and
+// not as late as 2% of the longer life it was first said with would be.
+func TestARecordSaidAgainForLessLongIsAskedAboutInThatLife(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		other := join(t, &network, port("en0", lan, 2))
+		asking := ask(t, open(t, engine.Config{Network: network.Host(port("en0", lan, 1))}), browse())
+
+		other.next()
+		other.answer(t, "en0", pointer("Kitchen", 604800))
+		asking.next(t, engine.Found)
+
+		// Between two of the questions that double, 127 and 255 seconds
+		// in: what is asked in the 100 seconds that follow is for the
+		// record getting old.
+		time.Sleep(130 * time.Second)
+		other.drain()
+
+		said := time.Now()
+
+		other.answer(t, "en0", pointer("Kitchen", 100))
+
+		lost := make(chan told, 1)
+
+		go func() { lost <- asking.next(t, engine.Lost) }()
+
+		var late []time.Duration
+
+		for {
+			select {
+			case gone := <-lost:
+				if gone.at.Sub(said) != 100*time.Second {
+					t.Errorf("lost after %s, want the 100 seconds it was last said for", gone.at.Sub(said))
+				}
+
+				if len(late) != 4 {
+					t.Fatalf("asked again %d times as it ran out: %v, want 4", len(late), late)
+				}
+
+				for index, after := range late {
+					least := time.Duration(80+5*index) * time.Second
+					if after < least || after > least+2*time.Second {
+						t.Errorf("asked again after %s, want %s to %s", after, least, least+2*time.Second)
+					}
+				}
+
+				return
+			case question := <-other.heard:
+				late = append(late, question.at.Sub(said))
+			}
+		}
+	})
+}
+
 // Section 10.1: a record said goodbye to is kept a second, and gone.
 func TestAGoodbye(t *testing.T) {
 	t.Parallel()
