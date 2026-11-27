@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -193,6 +194,13 @@ func (g *Group) Add(question Question) (int, error) {
 		number = g.last
 		g.watchers[number] = &watcher{interfaces: question.Interfaces, told: map[string]Answer{}, dirty: g.dirty}
 		g.engine.watch(g.watchers[number], asked)
+
+		// What is already known of it is something to tell: whoever
+		// waits is not to wait for the next thing heard.
+		select {
+		case g.dirty <- struct{}{}:
+		default:
+		}
 	})
 
 	return number, err
@@ -448,7 +456,9 @@ func (e *Engine) stand(watching *watcher) (map[string]Answer, []string) {
 		}
 
 		for _, one := range e.answers(via, watching.asking) {
-			ident := string(rune(one.record.Type())) + string(one.raw)
+			// The type as its two bytes: as a character, the types from
+			// 0xD800 to 0xDFFF would all be the same one.
+			ident := string(binary.BigEndian.AppendUint16(nil, one.record.Type())) + string(one.raw)
 
 			answer, known := stand[ident]
 			if !known {
