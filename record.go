@@ -63,7 +63,9 @@ type (
 		Types []Type
 	}
 	// Raw is a record of a type this package has no word for, as its
-	// bytes.
+	// bytes, every name in them written in full. For a type whose data
+	// has a shape, an address, a name, a text and the like, bytes that
+	// are not of that shape are ErrInvalid where the record is given.
 	Raw struct {
 		Kind  Type
 		Bytes []byte
