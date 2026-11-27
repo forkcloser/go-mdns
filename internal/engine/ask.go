@@ -734,19 +734,31 @@ func (e *Engine) asKnown(heard *link, key askKey, theirs map[said]struct{}) {
 // one question it should be answered to. Two of them and ten seconds
 // with no answer, and the record is forgotten.
 func (e *Engine) missing(heard *link, key askKey, theirs map[said]struct{}) {
-	for kind, held := range heard.cache[key.name] {
-		if key.kind != wire.TypeANY && key.kind != kind {
+	held := heard.cache[key.name]
+
+	// A question for one type is against the records of that type: a
+	// name may hold thousands of others, and a message as many questions.
+	if key.kind != wire.TypeANY {
+		e.unanswered(key.name, key.kind, held[key.kind], theirs)
+
+		return
+	}
+
+	for kind, records := range held {
+		e.unanswered(key.name, kind, records, theirs)
+	}
+}
+
+// unanswered counts a question against the records held of a name and a
+// type that its asker does not say it knows.
+func (e *Engine) unanswered(name string, kind uint16, held []*entry, theirs map[said]struct{}) {
+	for _, one := range held {
+		if _, known := theirs[said{name, kind, string(one.raw)}]; known || !one.alive(e.now) {
 			continue
 		}
 
-		for _, one := range held {
-			if _, known := theirs[said{key.name, kind, string(one.raw)}]; known || !one.alive(e.now) {
-				continue
-			}
-
-			if one.passedOver(e.now) {
-				e.soon(one.since.Add(doubt))
-			}
+		if one.passedOver(e.now) {
+			e.soon(one.since.Add(doubt))
 		}
 	}
 }
