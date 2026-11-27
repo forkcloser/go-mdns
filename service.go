@@ -189,6 +189,23 @@ func announcedType(written string) error {
 	return nil
 }
 
+// foundHost is the name of a host to look for, which may be one an
+// Instance was found on: a name of one label is under "local", and a
+// longer one is the name it is, under "local" or not. A service may say
+// it is on a host of any name.
+func foundHost(written string) (Name, error) {
+	name, err := ParseName(written)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(name) == 1 {
+		name = append(name, local)
+	}
+
+	return name, nil
+}
+
 // hostName is a host's name as a Name under "local": "printer",
 // "printer.local" and "printer.local." are the same host.
 func hostName(written string) (Name, error) {
