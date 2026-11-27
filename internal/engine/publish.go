@@ -450,6 +450,21 @@ func (e *Engine) readdressed(stood *standing) {
 
 	forget(stood, before)
 
+	// A name the standing had nothing to say of alone, and now has: it
+	// was never asked for on this link, and is before any of it is said
+	// (8.1). A host with no address to say when it was published is one.
+	// A standing that is still asking for its other names starts over,
+	// with this one among them.
+	named := func(records []*owned, key string) bool {
+		return slices.ContainsFunc(records, func(one *owned) bool { return one.unique() && one.key == key })
+	}
+
+	if slices.ContainsFunc(stood.records, func(now *owned) bool { return now.unique() && !named(before, now.key) }) {
+		e.claim(stood)
+
+		return
+	}
+
 	if !stood.live || slices.Equal(before, stood.records) {
 		return
 	}
