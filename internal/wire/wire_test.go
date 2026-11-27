@@ -307,10 +307,10 @@ func TestWhatCannotBeWritten(t *testing.T) {
 		}
 	}
 
-	// A name of 255 bytes is the longest there is.
-	fits := wire.Record{Name: []string{long, long, long, long[:61]}, Data: wire.Text{}}
+	// A name of 255 bytes and its zero is the longest there is.
+	fits := wire.Record{Name: []string{long, long, long, long[:62]}, Data: wire.Text{}}
 	if err := wire.NewBuilder(nil, wire.Header{}, wire.Options{}).Answer(fits); err != nil {
-		t.Errorf("a name of 255 bytes: %v", err)
+		t.Errorf("a name of 255 bytes and its zero: %v", err)
 	}
 
 	// The sections come in order.

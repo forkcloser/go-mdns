@@ -56,7 +56,7 @@ func TestTheBoundsOfWhatIsNotAMessage(t *testing.T) {
 		"eleven bytes":                      make([]byte, 11),
 		"a label longer than what is left":  packet(head(1, 0), []byte{5, 'a', 'b'}),
 		"a length byte of 64":               packet(head(1, 0), []byte{0x40}, bytes.Repeat([]byte{'a'}, 64), question),
-		"a name of 256 bytes":               packet(head(1, 0), labels(62), question),
+		"a name of 256 bytes and its zero":  packet(head(1, 0), labels(63), question),
 		"a pointer into the labels it ends": packet(head(1, 0), []byte{3, 1, 'a', 0, 0xC0, 13}, question),
 	} {
 		if _, err := wire.Parse(read); !errors.Is(err, wire.ErrMalformed) {
@@ -64,9 +64,10 @@ func TestTheBoundsOfWhatIsNotAMessage(t *testing.T) {
 		}
 	}
 
-	// A name of 255 bytes is one.
-	if read, err := wire.Parse(packet(head(1, 0), labels(61), question)); err != nil || len(read.Questions) != 1 {
-		t.Errorf("a name of 255 bytes: %v", err)
+	// A name of 255 bytes and its zero is one (RFC 6762 appendix C: "MUST
+	// support names up to 255 bytes plus a terminating zero").
+	if read, err := wire.Parse(packet(head(1, 0), labels(62), question)); err != nil || len(read.Questions) != 1 {
+		t.Errorf("a name of 255 bytes and its zero: %v", err)
 	}
 }
 
@@ -144,18 +145,18 @@ func TestTheBoundsOfAName(t *testing.T) {
 	message := wire.NewBuilder(nil, wire.Header{}, wire.Options{})
 
 	if err := message.Question(
-		wire.Question{Name: []string{long, long, long, long[:61]}, Type: wire.TypeA},
+		wire.Question{Name: []string{long, long, long, long[:62]}, Type: wire.TypeA},
 	); err != nil {
-		t.Errorf("a name of 255 bytes: %v", err)
+		t.Errorf("a name of 255 bytes and its zero: %v", err)
 	}
 
 	if err := message.Question(
-		wire.Question{Name: []string{long, long, long, long[:62]}, Type: wire.TypeA},
+		wire.Question{Name: []string{long, long, long, long}, Type: wire.TypeA},
 	); !errors.Is(
 		err,
 		wire.ErrInvalid,
 	) {
-		t.Errorf("a name of 256 bytes: %v", err)
+		t.Errorf("a name of 256 bytes and its zero: %v", err)
 	}
 }
 
