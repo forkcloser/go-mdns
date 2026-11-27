@@ -61,10 +61,23 @@ func (e *Engine) questioned(heard *link, arrived arrival) {
 
 	planned := plan{all: true, whole: true}
 
+	// A question a message repeats is one question, and a record one
+	// answer whatever the number of questions it answers: what a message
+	// has a host say, and what it costs it, goes by what is asked and
+	// not by how often.
+	asked := make(map[posed]struct{}, len(message.Questions))
+
 	for _, question := range message.Questions {
 		if question.Class != wire.ClassIN && question.Class != classANY {
 			continue
 		}
+
+		one := posed{nameKey(question.Name), question.Type, question.Class, question.Unicast}
+		if _, again := asked[one]; again {
+			continue
+		}
+
+		asked[one] = struct{}{}
 
 		// Another host asking for a name with what it means to say of
 		// it: one of the two may have to yield.
@@ -126,12 +139,21 @@ func (e *Engine) continued(heard *link, source netip.Addr, message wire.Message)
 	}
 }
 
+// posed is a question as a message may repeat it.
+type posed struct {
+	name    string
+	kind    uint16
+	class   uint16
+	unicast bool
+}
+
 // plan is what is to be answered to a message of questions.
 type plan struct {
 	// answers is what is to be said to all, and alone what is to be
-	// said to the asker.
+	// said to the asker; taken is what is in each already.
 	answers []*owned
 	alone   []*owned
+	taken   map[taking]struct{}
 	// all says every record is this host's alone, and whole that every
 	// question has an answer.
 	all   bool
@@ -169,14 +191,44 @@ func (p *plan) take(heard *link, arrived arrival, question wire.Question, now ti
 		// learn that the name is taken.
 		defended := defending && question.Unicast && heard.neighbour(source)
 
-		if legacy || quiet || defended {
-			p.alone = append(p.alone, record)
-		}
-
-		if !legacy && !quiet {
-			p.answers = append(p.answers, record)
-		}
+		p.give(record, legacy || quiet || defended, !legacy && !quiet)
 	}
+}
+
+// give adds a record to what is to be said, to the asker alone, to all
+// or both.
+func (p *plan) give(record *owned, alone, all bool) {
+	if alone && p.once(record, true) {
+		p.alone = append(p.alone, record)
+	}
+
+	if all && p.once(record, false) {
+		p.answers = append(p.answers, record)
+	}
+}
+
+// taking is a record in what is to be said, to the asker alone or to
+// all.
+type taking struct {
+	record *owned
+	alone  bool
+}
+
+// once says whether a record is not yet in what is to be said, and
+// counts it in: a record is said once however often a message asks for
+// it, and a name's records answer the question for any type as well.
+func (p *plan) once(record *owned, alone bool) bool {
+	if _, there := p.taken[taking{record, alone}]; there {
+		return false
+	}
+
+	if p.taken == nil {
+		p.taken = map[taking]struct{}{}
+	}
+
+	p.taken[taking{record, alone}] = struct{}{}
+
+	return true
 }
 
 // between is a wait chosen at random between two.

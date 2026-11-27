@@ -290,3 +290,131 @@ func TestAHostAsksItselfForWhatItHasNot(t *testing.T) {
 		everything.nothing(t)
 	})
 }
+
+// RFC 6762 section 6: a responder answers what it is asked, and its
+// limits are there against "excessive packet flooding due to software
+// bugs or malicious attack". A message that repeats one question two
+// hundred times, or asks two questions the same records answer, is
+// answered with each record once: to its asker alone where it asks for
+// that, as a host asking for a name does, and to a resolver that is no
+// Multicast DNS host.
+func TestAQuestionRepeatedIsAnsweredOnce(t *testing.T) {
+	t.Parallel()
+
+	repeated := func(t *testing.T, id uint16, questions ...wire.Question) []byte {
+		t.Helper()
+
+		message := wire.NewBuilder(nil, wire.Header{ID: id}, wire.Options{Limit: 1472})
+
+		for range 200 / len(questions) {
+			for _, question := range questions {
+				if err := message.Question(question); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+
+		// What the asker means to say of the name, as a host asking for
+		// it does: it is then answered at once, and alone.
+		if id == 0 {
+			record := wire.Record{Name: instanceName(), Class: wire.ClassIN, TTL: 120, Data: wire.Text{}}
+			if err := message.Authority(record); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		return message.Bytes()
+	}
+
+	once := func(t *testing.T, what string, answers []wire.Record) {
+		t.Helper()
+
+		seen := map[string]int{}
+
+		for _, record := range answers {
+			data, err := wire.AppendData(nil, record.Data)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			seen[fmt.Sprint(record.Name, record.Type())+string(data)]++
+		}
+
+		// The service's SRV and TXT records.
+		if len(seen) != 2 || len(answers) != 2 {
+			t.Errorf("%s: answered with %d records, %d of them distinct; want the name's two, each once",
+				what, len(answers), len(seen))
+		}
+	}
+
+	alone := func(name []string, kind uint16) wire.Question {
+		question := query(name, kind)
+		question.Unicast = true
+
+		return question
+	}
+
+	for what, questions := range map[string][]wire.Question{
+		"one question, two hundred times":       {alone(instanceName(), wire.TypeANY)},
+		"two questions the same records answer": {alone(instanceName(), wire.TypeANY), alone(instanceName(), wire.TypeSRV), alone(instanceName(), wire.TypeTXT)},
+	} {
+		t.Run(what, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var network mdnstest.Network
+
+				other := join(t, &network, port("en0", lan, 2))
+				resolver := network.Host(port("en0", lan, 7))
+				host := open(t, engine.Config{Network: network.Host(port("en0", lan, 1))})
+
+				settled(t, host, other, engine.Set{Records: service()})
+				time.Sleep(time.Minute)
+				other.drain()
+
+				if err := other.link(t, "en0").Multicast(repeated(t, 0, questions...)); err != nil {
+					t.Fatal(err)
+				}
+
+				time.Sleep(2 * time.Second)
+				synctest.Wait()
+
+				var told []wire.Record
+
+				for len(other.heard) > 0 {
+					if message := <-other.heard; !message.group {
+						told = append(told, message.Answers...)
+					}
+				}
+
+				once(t, "to the host that asks for the name", told)
+
+				// A resolver, from a port of its own.
+				socket, err := resolver.Socket(netip.MustParseAddrPort("192.0.2.7:49152"))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				defer func() { _ = socket.Close() }()
+
+				if err = socket.Multicast(repeated(t, 7, questions...)); err != nil {
+					t.Fatal(err)
+				}
+
+				buf := make([]byte, transport.MaxPacket)
+
+				size, _, err := socket.Read(buf)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				answer, err := wire.Parse(buf[:size])
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				once(t, "to a resolver", answer.Answers)
+			})
+		})
+	}
+}
