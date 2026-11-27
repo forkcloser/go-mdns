@@ -17,6 +17,9 @@ type link struct {
 	iface  transport.Interface
 	family transport.Family
 	addrs  []netip.Prefix
+	// single says the Engine speaks this family and not the other: what
+	// addresses of the other the interface has it does not know.
+	single bool
 
 	// cache is what was heard, by name and then by type.
 	cache  map[string]map[uint16][]*entry
@@ -79,6 +82,7 @@ func (e *Engine) up(arrived transport.Link) {
 		wire:   arrived,
 		iface:  iface,
 		family: family,
+		single: e.cfg.Families == family,
 		addrs:  arrived.Addrs(),
 		cache:  map[string]map[uint16][]*entry{},
 	}
