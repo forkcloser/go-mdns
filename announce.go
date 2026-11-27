@@ -27,11 +27,15 @@ type Announcement struct {
 
 	// mu guards what follows: the name it has and how many were refused
 	// before it, its host, its text, and what it is published as.
-	mu        sync.Mutex
-	name      string
-	refused   int
-	target    Name
-	text      TXT
+	mu      sync.Mutex
+	name    string
+	refused int
+	target  Name
+	text    TXT
+	// changes counts the times its host or its text changed: a name
+	// takes a second to ask for, and what is published under it is what
+	// the service was when the asking began.
+	changes   int
 	published *engine.Publication
 	err       error
 }
@@ -160,8 +164,17 @@ func (a *Announcement) Update(ctx context.Context, text TXT) error {
 	}
 
 	a.text = slices.Clone(text)
+	a.changes++
 
-	return translate(a.published.Update(a.records()))
+	err := a.published.Update(a.records())
+
+	// The name was lost to another host, and the next is being asked
+	// for: the text is said with it.
+	if errors.Is(err, engine.ErrClosed) && errors.Is(a.published.Err(), engine.ErrConflict) {
+		return nil
+	}
+
+	return translate(err)
 }
 
 // Close withdraws the service: its neighbours are told goodbye, and
@@ -258,6 +271,7 @@ func (a *Announcement) publish(ctx context.Context) error {
 
 		a.mu.Lock()
 		set := engine.Set{Records: a.records(), Interfaces: a.service.Interfaces}
+		built := a.changes
 		a.mu.Unlock()
 
 		asking, done := held.during(ctx)
@@ -270,11 +284,7 @@ func (a *Announcement) publish(ctx context.Context) error {
 
 		switch {
 		case err == nil:
-			a.mu.Lock()
-			a.published = published
-			a.mu.Unlock()
-
-			return nil
+			return a.install(published, built)
 		case errors.Is(err, engine.ErrConflict):
 			if !a.renamed() {
 				return fmt.Errorf("%w: the service %q", ErrConflict, a.Name())
@@ -285,6 +295,22 @@ func (a *Announcement) publish(ctx context.Context) error {
 			return translate(err)
 		}
 	}
+}
+
+// install makes a publication the service's, built when the service
+// had changed so many times. Its host renamed or its text changed while
+// the name was asked for, it is brought to what the service now is.
+func (a *Announcement) install(published *engine.Publication, built int) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.published = published
+
+	if a.changes != built {
+		_ = published.Update(a.records())
+	}
+
+	return nil
 }
 
 // renamed gives the service the name Rename answers to the one it has
@@ -347,6 +373,7 @@ func (a *Announcement) retarget(host Name) {
 	}
 
 	a.target = host
+	a.changes++
 
 	if a.published != nil {
 		_ = a.published.Update(a.records())

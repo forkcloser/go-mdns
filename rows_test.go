@@ -867,6 +867,80 @@ func TestAPeerClosedWhileAServiceIsAnnounced(t *testing.T) {
 	}
 }
 
+// renaming announces a service on a Peer whose name another host then
+// says is its own, and does something a moment into the service asking
+// for its next name, Pantry.
+func renaming(
+	t *testing.T,
+	network *mdnstest.Network,
+	meanwhile func(*mdns.Peer, *mdns.Announcement),
+) *mdns.Announcement {
+	t.Helper()
+
+	kitchen := peer(t, network, "kitchen", wired("en0", "lan", "1"))
+	other := stationed(t, network, wired("en0", "lan", "9"))
+
+	var announced *mdns.Announcement
+
+	announced, err := kitchen.Announce(t.Context(), mdns.Service{
+		Name: "Kitchen", Type: "_http._tcp", Port: 80, Text: mdns.TXT{{Key: "v", Value: []byte("old")}},
+		Rename: func(string, int) (string, bool) {
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				meanwhile(kitchen, announced)
+			}()
+
+			return "Pantry", true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(5 * time.Second)
+
+	theirs := of(
+		[]string{"Kitchen", "_http", "_tcp", "local"}, 120, true,
+		wire.Service{Port: 81, Target: []string{"other", "local"}},
+	)
+
+	other.say(t, "en0", theirs)
+	time.Sleep(300 * time.Millisecond)
+	other.say(t, "en0", theirs)
+
+	return announced
+}
+
+// A service whose text is changed while it asks for another name is
+// still announced: the change is taken, and said with the name.
+func TestAServiceChangedWhileItIsRenamed(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		browser := peer(t, &network, "browser", wired("en0", "lan", "2"))
+		found := browse(t, browser, mdns.Query{Type: "_http._tcp"})
+		updated := make(chan error, 1)
+
+		announced := renaming(t, &network, func(_ *mdns.Peer, announced *mdns.Announcement) {
+			updated <- announced.Update(t.Context(), mdns.TXT{{Key: "v", Value: []byte("new")}})
+		})
+
+		if err := <-updated; err != nil {
+			t.Errorf("the text changed while the service asks for another name: %v", err)
+		}
+
+		time.Sleep(30 * time.Second)
+
+		got := found.stands(t)["Pantry"]
+		if announced.Name() != "Pantry" || announced.Err() != nil ||
+			!reflect.DeepEqual(got.Text, mdns.TXT{{Key: "v", Value: []byte("new")}}) {
+			t.Errorf("announced as %q (%v), found with the text %v", announced.Name(), announced.Err(), got.Text)
+		}
+	})
+}
+
 // A service is announced three times, as RFC 6762 section 8.3 allows,
 // and no more than that for having been pointed at the host it already was on.
 func TestAServiceIsAnnouncedOnce(t *testing.T) {
