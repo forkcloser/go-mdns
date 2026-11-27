@@ -275,10 +275,26 @@ func (l *link) matching(question wire.Question) []*owned {
 	}
 
 	if len(matched) == 0 && held && question.Type != wire.TypeANY {
-		return []*owned{l.denial(key)}
+		return l.denied(key)
 	}
 
 	return matched
+}
+
+// denied is the denial of a name, when there is one to say. A name with
+// an address has none on an Engine that speaks one family alone: the
+// record would say the name has no address of the other family, which
+// such an Engine does not know, and which another responder on this
+// host may be saying it has (RFC 6762 section 6.2).
+func (l *link) denied(key string) []*owned {
+	said := l.denial(key)
+
+	types, is := said.record.Data.(wire.NSEC)
+	if is && l.single && (slices.Contains(types.Types, wire.TypeA) || slices.Contains(types.Types, wire.TypeAAAA)) {
+		return nil
+	}
+
+	return []*owned{said}
 }
 
 // denial is the record that says which types a name of this host's has
@@ -516,7 +532,7 @@ func (l *link) goes(record *owned) []*owned {
 			return others
 		}
 
-		return []*owned{l.denial(record.key)}
+		return l.denied(record.key)
 	default:
 		return nil
 	}

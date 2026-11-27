@@ -65,7 +65,8 @@ type Config struct {
 	Rename Rename
 
 	// Families is the families to speak: IPv4, IPv6, or both. Zero is
-	// both.
+	// both. A Peer that speaks one says nothing of the host's addresses
+	// of the other, not even that there are none.
 	Families Family
 
 	// Interfaces says which interfaces to be on, of those the network

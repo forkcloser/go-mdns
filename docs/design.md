@@ -212,7 +212,7 @@ MTU (§17), and the IP TTL of what a link sends (§11).
 | §6 responding | says only records that are its own; answers within 10 ms for what is its alone, after 20 to 120 ms for what others may also answer, after 400 to 500 ms a question cut short; says no record to all twice in a second, a probe's answer aside |
 | §6 what is heard | takes no response from another port than 5353, and none sent to it alone but for a question it asked that way in the last two seconds |
 | §6.1 negative responses | says with NSEC which types its names have not, in the restricted form, without the NSEC bit |
-| §6.2 addresses | says all of an interface's own addresses on it and none of another's; the other family's with them, or that there is none |
+| §6.2 addresses | says all of an interface's own addresses on it and none of another's; the other family's with them, or that there is none; speaking one family alone, says nothing of the other, and denies nothing of a name that has an address |
 | §6.3 to §6.5 | answers every question of a message, in one message where it can, and with all it has for ANY |
 | §6.6 cooperating | takes the same record from another host as no conflict, and says its own again when the other's is to be forgotten in under half the time |
 | §6.7 legacy unicast | answers a question from another port to that port, the ID and the question repeated, no TTL over ten seconds, no record marked as its alone, no SRV target compressed |
