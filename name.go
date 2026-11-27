@@ -197,13 +197,22 @@ func instanceLabel(name string) error {
 		return fmt.Errorf("%w: a name that is empty", ErrInvalid)
 	case len(name) > maxLabel:
 		return fmt.Errorf("%w: the name %q is %d bytes, over %d", ErrInvalid, name, len(name), maxLabel)
-	case !utf8.ValidString(name):
-		return fmt.Errorf("%w: the name %q is not UTF-8", ErrInvalid, name)
 	}
 
-	for _, char := range []byte(name) {
+	return text(name)
+}
+
+// text reports a label that is not text as RFC 6762 section 16 has the
+// names a host announces be: not UTF-8, or holding an ASCII control
+// character.
+func text(label string) error {
+	if !utf8.ValidString(label) {
+		return fmt.Errorf("%w: the name %q is not UTF-8", ErrInvalid, label)
+	}
+
+	for _, char := range []byte(label) {
 		if char < ' ' || char == 0x7F {
-			return fmt.Errorf("%w: the name %q holds a control character", ErrInvalid, name)
+			return fmt.Errorf("%w: the name %q holds a control character", ErrInvalid, label)
 		}
 	}
 

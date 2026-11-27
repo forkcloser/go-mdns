@@ -1,6 +1,8 @@
 package mdns_test
 
 import (
+	"errors"
+	"net/netip"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -72,4 +74,85 @@ func TestAHostRenamedToANameAsItIsRead(t *testing.T) {
 			)
 		}
 	}
+}
+
+// RFC 6762 section 16: the names a host announces are text, UTF-8. A
+// host's name is held to that as an instance's is, its own and that of
+// a host it speaks for: one that is not UTF-8, or holds a control
+// character, was taken and its addresses said under it. Text that is
+// not ASCII is a name as good as any.
+func TestAHostsNameIsHeldToText(t *testing.T) {
+	t.Parallel()
+
+	var network mdnstest.Network
+
+	camera := mdns.Service{Type: "_http._tcp", Port: 80, Addrs: []netip.Addr{netip.MustParseAddr("192.0.2.40")}}
+
+	for what, written := range map[string]string{
+		"not UTF-8":       "caf\xe9",
+		"a NUL":           "a\\000b",
+		"a bell":          "bell\\007",
+		"a delete":        "del\\127",
+		"a label not so":  "garden.caf\xe9.local",
+		"a newline in it": "two\nlines",
+	} {
+		if _, err := mdns.Open(
+			t.Context(),
+			mdns.Config{Network: network.Host(), Hostname: written},
+		); !errors.Is(
+			err,
+			mdns.ErrInvalid,
+		) {
+			t.Errorf("a host named with %s: %v", what, err)
+		}
+
+		camera.Host = written
+		if err := camera.Validate(); !errors.Is(err, mdns.ErrInvalid) {
+			t.Errorf("a service on a host named with %s: %v", what, err)
+		}
+	}
+
+	for _, written := range []string{"café", "キッチン", "kitchen-2", "Kitchen display"} {
+		opened, err := mdns.Open(t.Context(), mdns.Config{Network: network.Host(), Hostname: written})
+		if err != nil {
+			t.Errorf("a host named %q: %v", written, err)
+
+			continue
+		}
+
+		_ = opened.Close()
+
+		camera.Host = written
+		if err = camera.Validate(); err != nil {
+			t.Errorf("a service on a host named %q: %v", written, err)
+		}
+	}
+
+	// A Rename that answers such a name has answered none.
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		first := peer(t, &network, "kitchen", wired("en0", "lan", "1"))
+		if _, err := first.Announce(
+			t.Context(),
+			mdns.Service{Name: "First", Type: "_http._tcp", Port: 80},
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		second, err := mdns.Open(t.Context(), mdns.Config{
+			Network: network.Host(wired("en0", "lan", "2")), Hostname: "kitchen",
+			Rename: func(string, int) (string, bool) { return "caf\xe9", true },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		defer func() { _ = second.Close() }()
+
+		_, err = second.Announce(t.Context(), mdns.Service{Name: "Second", Type: "_http._tcp", Port: 81})
+		if !errors.Is(err, mdns.ErrConflict) {
+			t.Errorf("a host renamed to a name that is not UTF-8: %v, want ErrConflict", err)
+		}
+	})
 }

@@ -54,10 +54,11 @@ type Interface = transport.Interface
 // name.
 type Config struct {
 	// Hostname is the name the host answers to, with or without ".local":
-	// what its services are reached at, and what LookupHost finds. Empty
-	// is the system's own. It is claimed when something is first
-	// announced, and not before: a Peer that only looks announces
-	// nothing, its name included.
+	// what its services are reached at, and what LookupHost finds. One
+	// label of text: UTF-8, with no control character. Empty is the
+	// system's own, or "host" when that is no such label. It is claimed
+	// when something is first announced, and not before: a Peer that
+	// only looks announces nothing, its name included.
 	Hostname string
 
 	// Rename says what to do when another host already has the host
@@ -135,7 +136,7 @@ func Open(ctx context.Context, cfg Config) (*Peer, error) {
 	wanted := systemHost()
 
 	if cfg.Hostname != "" {
-		named, err := hostName(cfg.Hostname)
+		named, err := announcedHost(cfg.Hostname)
 		if err != nil {
 			return nil, err
 		}

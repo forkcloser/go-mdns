@@ -50,7 +50,7 @@ func rename(asked Rename, taken string, tries int, host bool) (string, bool) {
 	// As it is read, not as it is written: "pantry.LOCAL." is the host
 	// pantry.
 	if host {
-		named, err := hostName(next)
+		named, err := announcedHost(next)
 		if err != nil || len(named) != len(Name{"host", local}) {
 			return "", false
 		}
@@ -69,7 +69,7 @@ func systemHost() string {
 		name, _, _ = strings.Cut(name, ".")
 	}
 
-	if _, err = hostName(name); err != nil || name == "" {
+	if _, err = announcedHost(name); err != nil || name == "" {
 		return "host"
 	}
 
