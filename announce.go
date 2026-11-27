@@ -299,10 +299,17 @@ func (a *Announcement) publish(ctx context.Context) error {
 
 // install makes a publication the service's, built when the service
 // had changed so many times. Its host renamed or its text changed while
-// the name was asked for, it is brought to what the service now is.
+// the name was asked for, it is brought to what the service now is; and
+// a service withdrawn meanwhile stays withdrawn.
 func (a *Announcement) install(published *engine.Publication, built int) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if a.err != nil {
+		_ = published.Close()
+
+		return ErrClosed
+	}
 
 	a.published = published
 
@@ -353,8 +360,21 @@ func (a *Announcement) keep(ctx context.Context) {
 			return
 		}
 
-		if !a.renamed() || a.publish(ctx) != nil {
+		if !a.renamed() {
 			a.end(ErrConflict)
+
+			return
+		}
+
+		// No name to be had is a conflict; anything else is the Peer
+		// closing while one was asked for.
+		if err := a.publish(ctx); err != nil {
+			why := ErrClosed
+			if errors.Is(err, ErrConflict) {
+				why = ErrConflict
+			}
+
+			a.end(why)
 
 			return
 		}

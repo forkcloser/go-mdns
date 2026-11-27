@@ -125,8 +125,12 @@ func (p *Peer) settled(ctx context.Context) (*claim, error) {
 			return nil, ErrClosed
 		}
 
+		// A Peer that closes while its host asks for another name leaves
+		// the lost one as it is.
 		select {
 		case <-held.replaced:
+		case <-p.life.Done():
+			return nil, ErrClosed
 		case <-ctx.Done():
 			return nil, fmt.Errorf("waiting for the host's next name: %w", context.Cause(ctx))
 		}
@@ -195,7 +199,14 @@ func (p *Peer) keepHost(held *claim) {
 		}
 
 		lost := held
-		held = p.reclaim(lost)
+
+		var closing bool
+
+		// A Peer that closes while its host asks for another name has
+		// lost none: its services end as closed, each by its keeper.
+		if held, closing = p.reclaim(lost); closing {
+			return
+		}
 
 		p.mu.Lock()
 		p.held = held
@@ -221,11 +232,12 @@ func (p *Peer) keepHost(held *claim) {
 }
 
 // reclaim holds the host under the name Rename gives for one that was
-// lost; and holds nothing when it gives none, or the Peer is closing.
-func (p *Peer) reclaim(lost *claim) *claim {
+// lost; and holds nothing when it gives none, or the Peer is closing,
+// which it says.
+func (p *Peer) reclaim(lost *claim) (held *claim, closing bool) {
 	next, ok := rename(p.rename, lost.label, lost.refused+1, true)
 	if !ok {
-		return nil
+		return nil, false
 	}
 
 	p.claiming.Lock()
@@ -233,10 +245,10 @@ func (p *Peer) reclaim(lost *claim) *claim {
 
 	held, err := p.claim(p.life, next, lost.refused+1)
 	if err != nil {
-		return nil
+		return nil, !errors.Is(err, ErrConflict)
 	}
 
-	return held
+	return held, false
 }
 
 // elsewhere is a host that is not this one, announced on its behalf.
