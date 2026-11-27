@@ -1,12 +1,14 @@
 package engine_test
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/forkcloser/go-mdns/internal/engine"
 	"github.com/forkcloser/go-mdns/internal/wire"
@@ -24,6 +26,164 @@ func sized(size int) wire.Text {
 	}
 
 	return text
+}
+
+// most is the most bytes a message is on an IPv6 link, where it is the
+// least: 9000 with its headers, which there are 48 bytes (RFC 6762
+// section 17).
+const most = 8952
+
+// RFC 6762 section 17: a message is 9000 bytes at most, its IP and UDP
+// headers included. A record that fits none cannot be said, and a set
+// that has one is refused, where it was published and never said. Up to
+// that, a record is said, alone in a message when it has to be.
+func TestARecordThatFitsNoMessageIsRefused(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		other := join(t, &network, mdnstest.Port{
+			Interface: "en0", Wire: lan, Addrs: []netip.Prefix{netip.MustParsePrefix("fe80::2/64")},
+		})
+		host := open(t, engine.Config{Network: network.Host(mdnstest.Port{
+			Interface: "en0", Wire: lan, Addrs: []netip.Prefix{netip.MustParsePrefix("fe80::1/64")},
+		})})
+
+		// Twelve bytes of header, eighteen of the type's name and ten of
+		// what a record always has leave 8912.
+		shared := func(size int) engine.Set {
+			return engine.Set{
+				Records: []wire.Record{{Name: typeName(), Class: wire.ClassIN, TTL: 120, Data: sized(size)}},
+			}
+		}
+
+		if _, err := host.Publish(t.Context(), shared(8913)); !errors.Is(err, engine.ErrInvalid) {
+			t.Errorf("a record one byte more than a message holds: %v", err)
+		}
+
+		published, err := host.Publish(t.Context(), shared(8912))
+		if err != nil {
+			t.Fatalf("a record that fills a message: %v", err)
+		}
+
+		time.Sleep(4 * time.Second)
+		synctest.Wait()
+
+		said := 0
+
+		for len(other.heard) > 0 {
+			message := <-other.heard
+			if len(message.Answers) != 1 || message.size != most {
+				continue
+			}
+
+			if text, is := message.Answers[0].Data.(wire.Text); is && slices.Equal(text.Strings, sized(8912).Strings) {
+				said++
+			}
+		}
+
+		if said != 3 {
+			t.Errorf("a record that fills a message was said whole %d times, want 3", said)
+		}
+
+		// Changed to one that fits none: refused, and what it was stays.
+		if err = published.Update(shared(8913).Records); !errors.Is(err, engine.ErrInvalid) {
+			t.Errorf("changed to a record one byte more than a message holds: %v", err)
+		}
+
+		other.ask(t, query(typeName(), wire.TypeTXT))
+		time.Sleep(time.Second)
+		synctest.Wait()
+
+		if len(other.heard) != 1 || (<-other.heard).size != most {
+			t.Error("after a change that was refused, the record is not answered with as it was")
+		}
+
+		// A set is said in as many messages as it takes: it is not held
+		// to what one holds.
+		var many []wire.Record
+
+		for index := range 80 {
+			many = append(many, wire.Record{
+				Name: []string{fmt.Sprintf("n%d", index), "local"}, Class: wire.ClassIN, TTL: 120, Data: sized(900),
+			})
+		}
+
+		if _, err = host.Publish(t.Context(), engine.Set{Records: many}); err != nil {
+			t.Fatalf("eighty records of 900 bytes: %v", err)
+		}
+
+		time.Sleep(500 * time.Millisecond)
+		synctest.Wait()
+
+		names := map[string]bool{}
+
+		for len(other.heard) > 0 {
+			for _, answer := range (<-other.heard).Answers {
+				names[answer.Name[0]] = true
+			}
+		}
+
+		if len(names) != len(many) {
+			t.Errorf("of eighty records of 900 bytes, %d were said", len(names))
+		}
+	})
+}
+
+// RFC 6762 section 8.1 and 8.2: a name is asked for in one message, with
+// the records meant for it, which another host asking at the same
+// moment compares with its own. Records that each fit a message, and
+// not that one together, are refused, where the question was never sent
+// and the name taken without having been asked for.
+func TestNamesThatCannotBeAskedForAreRefused(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		other := join(t, &network, mdnstest.Port{
+			Interface: "en0", Wire: lan, Addrs: []netip.Prefix{netip.MustParsePrefix("fe80::2/64")},
+		})
+		host := open(t, engine.Config{Network: network.Host(mdnstest.Port{
+			Interface: "en0", Wire: lan, Addrs: []netip.Prefix{netip.MustParsePrefix("fe80::1/64")},
+		})})
+
+		// The header is twelve bytes; the question is the name, 26, and
+		// four; the SRV its name as a pointer, two, ten, six and its
+		// host with "local" as a pointer, ten; the TXT two and ten, and
+		// its data: 8870 bytes of it fill the message.
+		with := func(size int) engine.Set {
+			records := service()
+			records[2].Data = sized(size)
+
+			return engine.Set{Records: records}
+		}
+
+		if _, err := host.Publish(t.Context(), with(8871)); !errors.Is(err, engine.ErrInvalid) {
+			t.Errorf("records one byte more than the question for their name holds: %v", err)
+		}
+
+		if result := <-publish(t, host, with(8870)); result.err != nil {
+			t.Fatalf("records that fill the question for their name: %v", result.err)
+		}
+
+		synctest.Wait()
+
+		asked := 0
+
+		for len(other.heard) > 0 {
+			message := <-other.heard
+			if !message.Header.Response && len(message.Questions) == 1 && len(message.Authorities) == 2 &&
+				message.size == most {
+				asked++
+			}
+		}
+
+		if asked != 3 {
+			t.Errorf("the name was asked for, with its records, %d times before it was taken, want 3", asked)
+		}
+	})
 }
 
 // A host with more addresses than the question for its name holds still

@@ -179,6 +179,11 @@ type Publication struct {
 // type the Peer already has as the host's alone on an interface these
 // are wanted on, a service's and the host's own addresses included. It is what Announce is made
 // of, and is there for what it has no word for.
+//
+// Records that cannot be said are ErrInvalid: one that fits no message,
+// which is 9000 bytes at most with its IP and UDP headers, or those of
+// a name that is the host's alone when they do not fit together the one
+// message that name is asked for in.
 func (p *Peer) Publish(ctx context.Context, records Records) (*Publication, error) {
 	set := engine.Set{Interfaces: records.Interfaces}
 
