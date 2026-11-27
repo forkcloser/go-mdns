@@ -47,12 +47,15 @@ func rename(asked Rename, taken string, tries int, host bool) (string, bool) {
 		return "", false
 	}
 
+	// As it is read, not as it is written: "pantry.LOCAL." is the host
+	// pantry.
 	if host {
-		if named, err := hostName(next); err != nil || len(named) != len(Name{"host", local}) {
+		named, err := hostName(next)
+		if err != nil || len(named) != len(Name{"host", local}) {
 			return "", false
 		}
 
-		return strings.TrimSuffix(strings.TrimSuffix(next, "."), "."+local), true
+		return named[0], true
 	}
 
 	return next, instanceLabel(next) == nil
