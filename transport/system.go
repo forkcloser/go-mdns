@@ -273,7 +273,8 @@ func (w *watch) read(from *socket) {
 		link := w.links[where{index: index, family: from.family}]
 		w.mu.RUnlock()
 
-		if link == nil {
+		// Nothing is kept for a link no one reads any more.
+		if link == nil || link.shutDown() {
 			continue
 		}
 
@@ -455,6 +456,13 @@ func (l *hostLink) join() error {
 func (l *hostLink) readdress(shape found) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// A link its consumer closed has left the group and has no address
+	// it joined with: it follows nothing of what its interface becomes,
+	// and is kept so that the interface is not taken for a new one.
+	if l.shutDown() {
+		return false
+	}
 
 	l.mtu = shape.mtu
 
