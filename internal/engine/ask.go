@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -449,7 +450,9 @@ func (e *Engine) stand(watching *watcher) (map[string]Answer, []string) {
 		}
 
 		for _, one := range e.answers(via, watching.asking) {
-			ident := string(rune(one.record.Type())) + string(one.raw)
+			// The type as its two bytes: as a character, the types from
+			// 0xD800 to 0xDFFF would all be the same one.
+			ident := string(binary.BigEndian.AppendUint16(nil, one.record.Type())) + string(one.raw)
 
 			answer, known := stand[ident]
 			if !known {
