@@ -333,18 +333,36 @@ type source struct {
 	once wanted
 }
 
-// load reads what to announce from where it comes from.
-func (s *source) load(env *Environment) (wanted, error) {
+// load reads what to announce from where it comes from, until ctx ends.
+func (s *source) load(ctx context.Context, env *Environment) (wanted, error) {
 	switch s.path {
 	case "":
 		return s.once, nil
 	case "-":
-		written, err := io.ReadAll(env.In)
-		if err != nil {
-			return wanted{}, fmt.Errorf("reading standard input: %w", err)
+		// Read apart: nothing ends the read of a terminal, or of a pipe
+		// no one writes to, but what is at its other end.
+		type document struct {
+			written []byte
+			err     error
 		}
 
-		return read(written)
+		whole := make(chan document, 1)
+
+		go func() {
+			written, err := io.ReadAll(env.In)
+			whole <- document{written, err}
+		}()
+
+		select {
+		case got := <-whole:
+			if got.err != nil {
+				return wanted{}, fmt.Errorf("reading standard input: %w", got.err)
+			}
+
+			return read(got.written)
+		case <-ctx.Done():
+			return wanted{}, fmt.Errorf("reading standard input: %w", context.Cause(ctx))
+		}
 	default:
 		written, err := os.ReadFile(s.path)
 		if err != nil {

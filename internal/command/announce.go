@@ -24,14 +24,26 @@ type announcing struct {
 }
 
 // announce announces services until it is told to stop, or one of them
-// is lost for good.
+// is lost for good. Told to stop, it has done what it was asked, however
+// far it had come.
 func announce(ctx context.Context, env *Environment, args []string) error {
+	err := announceAll(ctx, env, args)
+	if ctx.Err() != nil && errors.Is(err, context.Cause(ctx)) {
+		return nil
+	}
+
+	return err
+}
+
+// announceAll announces the services it is asked to, and returns when
+// ctx ends or one of them is lost for good.
+func announceAll(ctx context.Context, env *Environment, args []string) error {
 	from, err := announced(args)
 	if err != nil {
 		return err
 	}
 
-	want, err := from.load(env)
+	want, err := from.load(ctx, env)
 	if err != nil {
 		return err
 	}
@@ -165,7 +177,7 @@ func (a *announcing) start(ctx context.Context, one asked) error {
 			Name:  announced.Name(),
 			Asked: one.service.Name,
 			Type:  one.service.Type,
-			Host:  a.peer.Hostname(),
+			Host:  a.host(&one.service),
 		},
 	)
 
@@ -186,6 +198,22 @@ func (a *announcing) start(ctx context.Context, one asked) error {
 	})
 
 	return nil
+}
+
+// host is the host a service is announced on, as it is said: this one,
+// or the one the service says it is on, under "local" as this one is.
+func (a *announcing) host(service *mdns.Service) string {
+	if service.Host == "" {
+		return a.peer.Hostname()
+	}
+
+	// A name, or the service would not have been announced.
+	name, _ := mdns.ParseName(service.Host)
+	if len(name) == 0 || !strings.EqualFold(name[len(name)-1], "local") {
+		name = append(name, "local")
+	}
+
+	return name.String()
 }
 
 // numbered is the name to take in place of one that is taken, as RFC
