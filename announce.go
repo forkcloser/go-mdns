@@ -236,27 +236,53 @@ func (a *Announcement) records() []wire.Record {
 
 // publish announces the service under the name it has, and under the
 // next that Rename gives for as long as the one tried is taken.
+//
+// A service on this host is announced at a name the host holds: one the
+// host has lost and not yet replaced is waited out, and the asking
+// starts over when the host loses its name while the service's is asked
+// for. The lost name is another host's, and a service said to be there
+// sends its users to that host.
 func (a *Announcement) publish(ctx context.Context) error {
 	for {
+		var held *claim
+
+		if a.elsewhere == nil {
+			var err error
+
+			if held, err = a.peer.settled(ctx); err != nil {
+				return err
+			}
+
+			a.retarget(Name{held.label, local})
+		}
+
 		a.mu.Lock()
 		set := engine.Set{Records: a.records(), Interfaces: a.service.Interfaces}
 		a.mu.Unlock()
 
-		published, err := a.peer.engine.Publish(ctx, set)
-		if err == nil {
+		asking, done := held.during(ctx)
+		published, err := a.peer.engine.Publish(asking, set)
+
+		// Looked at before the asking is let go of, which ends it too.
+		gone := ctx.Err() == nil && asking.Err() != nil
+
+		done()
+
+		switch {
+		case err == nil:
 			a.mu.Lock()
 			a.published = published
 			a.mu.Unlock()
 
 			return nil
-		}
-
-		if !errors.Is(err, engine.ErrConflict) {
+		case errors.Is(err, engine.ErrConflict):
+			if !a.renamed() {
+				return fmt.Errorf("%w: the service %q", ErrConflict, a.Name())
+			}
+		case gone:
+			// The host's name went: again, at its next.
+		default:
 			return translate(err)
-		}
-
-		if !a.renamed() {
-			return fmt.Errorf("%w: the service %q", ErrConflict, a.Name())
 		}
 	}
 }
