@@ -223,10 +223,13 @@ func (e *Engine) contested(heard *link, record wire.Record, local bool) {
 	for _, stood := range slices.Clone(heard.standing) {
 		// Another host says the same, as one that answers for this one
 		// may: no conflict. Should it say so for less than half as long,
-		// or goodbye, this host says its own again (6.6).
+		// or goodbye, this host says its own again (6.6), with the rest
+		// of its set.
 		if same := slices.IndexFunc(stood.records, func(one *owned) bool { return one.is(key, kind, raw) }); same >= 0 {
 			if stood.live && 2*uint64(record.TTL) < uint64(stood.records[same].record.TTL) {
-				e.reply(heard, stood.records[same], e.now, false)
+				for _, member := range stood.set(stood.records[same]) {
+					e.reply(heard, member, e.now, false)
+				}
 			}
 
 			continue
@@ -236,6 +239,27 @@ func (e *Engine) contested(heard *link, record wire.Record, local bool) {
 			e.taken(stood, record, key, local)
 		}
 	}
+}
+
+// set is what is said along with a record of the standing's. What is
+// this host's alone is said whole, every record of the name and the
+// type (10.2): the bit it is said with has its hearers forget, a second
+// later, what else they held of the set. What others may say too is
+// said alone.
+func (s *standing) set(record *owned) []*owned {
+	if !record.unique() {
+		return []*owned{record}
+	}
+
+	var whole []*owned
+
+	for _, member := range s.records {
+		if member.key == record.key && member.record.Type() == record.record.Type() {
+			whole = append(whole, member)
+		}
+	}
+
+	return whole
 }
 
 // taken takes a record another says of a name, that is not one this
