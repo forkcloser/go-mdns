@@ -24,8 +24,20 @@ type announcing struct {
 }
 
 // announce announces services until it is told to stop, or one of them
-// is lost for good.
+// is lost for good. Told to stop, it has done what it was asked, however
+// far it had come.
 func announce(ctx context.Context, env *Environment, args []string) error {
+	err := announceAll(ctx, env, args)
+	if ctx.Err() != nil && errors.Is(err, context.Cause(ctx)) {
+		return nil
+	}
+
+	return err
+}
+
+// announceAll announces the services it is asked to, and returns when
+// ctx ends or one of them is lost for good.
+func announceAll(ctx context.Context, env *Environment, args []string) error {
 	from, err := announced(args)
 	if err != nil {
 		return err
