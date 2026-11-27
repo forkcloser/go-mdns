@@ -12,6 +12,27 @@ golangci:
         - path: example_test\.go
           linters:
             - testableexamples
+        # The tests write the documents they hand the command in a
+        # directory of their own, which no other process renames or removes.
+        - path: _test\.go
+          linters:
+            - forbidigo
+          text: go-xos
+    settings:
+      depguard:
+        rules:
+          main:
+            allow:
+              # The document the command is told to read, through the one
+              # way this organization opens files.
+              - github.com/forkcloser/go-xos
+      forbidigo:
+        forbid:
+          # The library opens no file; what the command opens goes through
+          # go-xos, whose handles let a file be renamed or removed while
+          # open on Windows.
+          - pattern: '^os\.(Open|OpenFile|Create|CreateTemp|MkdirTemp|ReadFile|WriteFile|ReadDir|Rename|Stat|Truncate)$'
+            msg: "open files through github.com/forkcloser/go-xos"
 
 # mdns is installed with `go install`, from the tree: no release builds a
 # binary of it yet. It moves to .release-go.yaml's builds the day one

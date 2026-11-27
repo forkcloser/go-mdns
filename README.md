@@ -9,7 +9,9 @@ two RFCs, section by section.
 It implements the protocol whole: a responder that asks for its names before it uses
 them and defends them after, a browser that keeps what it hears for as long as it was
 told to, over IPv4 and IPv6, on every interface of the host and knowing which, on Linux,
-macOS and Windows alike, with no dependency but Go's standard library.
+macOS and Windows alike. The library imports nothing but Go's standard library; the
+module's one requirement, [go-xos](https://github.com/forkcloser/go-xos), is the `mdns`
+command's, which reads the document it is given through it.
 
 ```go
 peer, err := mdns.Open(ctx, mdns.Config{})
