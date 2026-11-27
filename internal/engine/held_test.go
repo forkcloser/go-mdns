@@ -518,3 +518,166 @@ func TestARecordOthersMaySayWhenAnAddressChanges(t *testing.T) {
 		}
 	})
 }
+
+// RFC 6762 section 8.1: a name that is to be this host's alone is asked
+// for before a record of it is said. A host with no address to say on a
+// link when it is published has nothing to ask for there; when the
+// link's interface gains one, the name is asked for then, three times,
+// and the address said after, and where another host has the name it
+// is not taken.
+func TestAHostsNameIsAskedForWhenItsFirstAddressComes(t *testing.T) {
+	t.Parallel()
+
+	local := netip.MustParsePrefix("fe80::1/64")
+	routable := netip.MustParsePrefix("2001:db8::1/64")
+	wanted := func(_ transport.Interface, addr netip.Addr) bool { return !addr.IsLinkLocalUnicast() }
+
+	for what, taken := range map[string]bool{"a name no one has": false, "a name another host has": true} {
+		t.Run(what, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var network mdnstest.Network
+
+				other := join(t, &network, mdnstest.Port{
+					Interface: "en0", Wire: lan, Addrs: []netip.Prefix{netip.MustParsePrefix("fe80::2/64")},
+				})
+				machine := network.Host(mdnstest.Port{Interface: "en0", Wire: lan, Addrs: []netip.Prefix{local}})
+				host := open(t, engine.Config{Network: machine})
+
+				done := <-publish(t, host, engine.Set{Host: hostName(), Addresses: wanted})
+				if done.err != nil {
+					t.Fatal(done.err)
+				}
+
+				time.Sleep(time.Minute)
+				other.quiet(t, 0)
+
+				came := time.Now()
+
+				machine.Plug(mdnstest.Port{Interface: "en0", Wire: lan, Addrs: []netip.Prefix{local, routable}})
+
+				theirs := wire.Record{
+					Name: hostName(), Class: wire.ClassIN, TTL: 120, Flush: true,
+					Data: wire.Address{Addr: netip.MustParseAddr("2001:db8::2")},
+				}
+
+				for asked := range 3 {
+					probe := other.next()
+					if probe.Header.Response || len(probe.Questions) != 1 ||
+						!slices.Equal(probe.Questions[0].Name, hostName()) || probe.Questions[0].Type != wire.TypeANY {
+						t.Fatalf(
+							"after the address came, heard %+v; want the name asked for, for the %d time",
+							probe.Message,
+							asked+1,
+						)
+					}
+
+					// The host that has the name says so at the first
+					// question, and there is no second.
+					if taken {
+						other.answer(t, "en0", theirs)
+
+						break
+					}
+				}
+
+				if taken {
+					<-done.Done()
+
+					if !errors.Is(done.Err(), engine.ErrConflict) {
+						t.Errorf("another host has the name: the set ended with %v, want ErrConflict", done.Err())
+					}
+
+					other.quiet(t, 10*time.Second)
+
+					return
+				}
+
+				said := other.next()
+				if !said.Header.Response || len(said.Answers) != 1 || !said.Answers[0].Flush ||
+					said.Answers[0].Data != (wire.Address{Addr: routable.Addr()}) {
+					t.Errorf(
+						"after the name was asked for, heard %+v; want the address, as this host's alone",
+						said.Message,
+					)
+				}
+
+				if since := said.at.Sub(came); since < 750*time.Millisecond || since > time.Second {
+					t.Errorf("the address was said %s after it came; want after three questions 250 ms apart", since)
+				}
+			})
+		})
+	}
+}
+
+// And when the address comes while the set still asks for another name
+// of its own, however far along: the host's name is asked for three
+// times too before the address is said, not taken with the other.
+func TestAHostsNameIsAskedForWhenItsAddressComesWhileAnotherNameIs(t *testing.T) {
+	t.Parallel()
+
+	local := netip.MustParsePrefix("fe80::1/64")
+	routable := netip.MustParsePrefix("2001:db8::1/64")
+	wanted := func(_ transport.Interface, addr netip.Addr) bool { return !addr.IsLinkLocalUnicast() }
+
+	for _, after := range []time.Duration{100 * time.Millisecond, 400 * time.Millisecond, 700 * time.Millisecond} {
+		t.Run(after.String(), func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var network mdnstest.Network
+
+				other := join(t, &network, mdnstest.Port{
+					Interface: "en0", Wire: lan, Addrs: []netip.Prefix{netip.MustParsePrefix("fe80::2/64")},
+				})
+				machine := network.Host(mdnstest.Port{Interface: "en0", Wire: lan, Addrs: []netip.Prefix{local}})
+				host := open(t, engine.Config{Network: machine})
+
+				done := publish(t, host, engine.Set{
+					Host: hostName(), Addresses: wanted,
+					Records: []wire.Record{{
+						Name: instanceName(), Class: wire.ClassIN, TTL: 120, Flush: true,
+						Data: wire.Service{Port: 8080, Target: hostName()},
+					}},
+				})
+
+				time.Sleep(after)
+				other.drain()
+				machine.Plug(mdnstest.Port{Interface: "en0", Wire: lan, Addrs: []netip.Prefix{local, routable}})
+
+				asked := 0
+
+				for {
+					message := other.next()
+					if message.Header.Response {
+						if !slices.ContainsFunc(message.Answers, func(answer wire.Record) bool {
+							return answer.Flush && answer.Data == (wire.Address{Addr: routable.Addr()})
+						}) {
+							t.Errorf(
+								"heard %+v; want the address among what is said, as this host's alone",
+								message.Message,
+							)
+						}
+
+						break
+					}
+
+					if slices.ContainsFunc(message.Questions, func(question wire.Question) bool {
+						return slices.Equal(question.Name, hostName()) && question.Type == wire.TypeANY
+					}) {
+						asked++
+					}
+				}
+
+				if asked != 3 {
+					t.Errorf("the host's name was asked for %d times before its address was said, want 3", asked)
+				}
+
+				if result := <-done; result.err != nil {
+					t.Error(result.err)
+				}
+			})
+		})
+	}
+}
