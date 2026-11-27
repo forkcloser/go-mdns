@@ -12,7 +12,9 @@ const (
 	// its underscore, by RFC 6335.
 	maxServiceName = 15
 	// maxEntry is the most bytes one entry of a TXT record holds, and
-	// maxTXT the most a whole record does and still fits a message.
+	// maxTXT the most a whole record does by RFC 6763 section 6.2: what
+	// fits a message with a given service is less, and Service.Validate
+	// says.
 	maxEntry = 255
 	maxTXT   = 8900
 )
@@ -38,7 +40,9 @@ type Service struct {
 
 	// Text is the service's TXT record: what a client needs to know
 	// before it connects. Empty is a record with nothing in it, which
-	// every service has.
+	// every service has. RFC 6763 section 6.2 recommends 1300 bytes at
+	// most; what can be sent at all is some 8750, a little more or less
+	// with the length of the type's name and of Host's.
 	Text TXT
 
 	// Priority and Weight are the SRV record's, for a client choosing
@@ -76,8 +80,10 @@ type Service struct {
 // with why: a name that is not one label of text; a type that is not a
 // service name of up to fifteen letters, digits and hyphens under an
 // underscore, followed by "_tcp" or "_udp"; a subtype that is not one
-// label; a text record out of bounds; a host without addresses, or
-// addresses without a host; a TTL below zero.
+// label; a text record out of bounds, or more than the one message
+// that asks for the service's name holds with it when that name and
+// this host's are as long as a rename may make them; a host without
+// addresses, or addresses without a host; a TTL below zero.
 func (s *Service) Validate() error {
 	if s.Name != "" {
 		if err := instanceLabel(s.Name); err != nil {
@@ -103,7 +109,11 @@ func (s *Service) Validate() error {
 		return fmt.Errorf("%w: a TTL of %s", ErrInvalid, s.TTL)
 	}
 
-	return s.elsewhere()
+	if err := s.elsewhere(); err != nil {
+		return err
+	}
+
+	return s.fits(s.Text)
 }
 
 // elsewhere is Validate for a service on another host: that host's name

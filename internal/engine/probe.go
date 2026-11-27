@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/forkcloser/go-mdns/internal/wire"
+	"github.com/forkcloser/go-mdns/transport"
 )
 
 // How RFC 6762 section 8 has a host take a name.
@@ -66,35 +67,102 @@ func (e *Engine) probe(stood *standing) {
 		return
 	}
 
-	message := wire.NewBuilder(nil, wire.Header{}, wire.Options{})
-
-	var asked []string
-
-	for _, record := range stood.records {
-		if !record.unique() || slices.Contains(asked, record.key) {
-			continue
-		}
-
-		asked = append(asked, record.key)
-		_ = message.Question(
-			wire.Question{Name: record.record.Name, Type: wire.TypeANY, Class: wire.ClassIN, Unicast: true},
-		)
+	records := make([]wire.Record, len(stood.records))
+	for index, record := range stood.records {
+		records[index] = record.record
 	}
 
-	// What it means to say, so that another host asking for the same
-	// name at the same moment can tell which of the two is to yield.
-	for _, record := range stood.records {
-		if record.unique() {
-			proposed := record.record
-			proposed.Flush = false
-			_ = message.Authority(proposed)
-		}
+	// What does not fit is left out: a host with more addresses than a
+	// message holds still asks for its name.
+	messages, _ := claiming(records, stood.link.room(), transport.MaxPacket-stood.link.headers())
+	for _, message := range messages {
+		stood.link.say(message)
 	}
 
-	stood.link.say(message.Bytes())
 	stood.link.wished = e.now
 	stood.sent++
 	stood.timer = e.after(probeWait, func() { e.probe(stood) })
+}
+
+// claiming is the messages that ask for the names some records are to
+// hold alone: for each name a question, and the records meant for it,
+// so that another host asking for the same name at the same moment can
+// tell which of the two is to yield (RFC 6762 sections 8.1 and 8.2).
+// What a host means to say of a name is compared whole, so a name goes
+// whole in one message; the names go in as many messages as that takes,
+// of room bytes each, and a name that passes room alone in one of its
+// own, of most bytes. It says whether every name is whole: one whose
+// records pass most is asked for with those that fit.
+func claiming(records []wire.Record, room, most int) (messages [][]byte, whole bool) {
+	var order []string
+
+	named := map[string][]wire.Record{}
+
+	for _, record := range records {
+		if !record.Flush {
+			continue
+		}
+
+		key := nameKey(record.Name)
+		if _, known := named[key]; !known {
+			order = append(order, key)
+		}
+
+		record.Flush = false
+		named[key] = append(named[key], record)
+	}
+
+	header, _ := asked(nil, most)
+	whole = true
+
+	var together [][]wire.Record
+
+	size := len(header)
+	send := func() {
+		if len(together) > 0 {
+			message, _ := asked(together, most)
+			messages = append(messages, message)
+			together, size = nil, len(header)
+		}
+	}
+
+	// What the names of a message share is written once: together they
+	// take no more than each alone does.
+	for _, key := range order {
+		alone, fit := asked([][]wire.Record{named[key]}, most)
+		whole = whole && fit
+
+		if size+len(alone)-len(header) > room {
+			send()
+		}
+
+		together = append(together, named[key])
+		size += len(alone) - len(header)
+	}
+
+	send()
+
+	return messages, whole
+}
+
+// asked is one message that asks for names, each with its records, and
+// whether all of it fit in limit bytes.
+func asked(names [][]wire.Record, limit int) (message []byte, fit bool) {
+	built := wire.NewBuilder(nil, wire.Header{}, wire.Options{Limit: limit})
+	fit = true
+
+	for _, name := range names {
+		question := wire.Question{Name: name[0].Name, Type: wire.TypeANY, Class: wire.ClassIN, Unicast: true}
+		fit = built.Question(question) == nil && fit
+	}
+
+	for _, name := range names {
+		for _, record := range name {
+			fit = built.Authority(record) == nil && fit
+		}
+	}
+
+	return built.Bytes(), fit
 }
 
 // settle makes a standing's records answered for, and says them.

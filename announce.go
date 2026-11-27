@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -142,13 +143,19 @@ func (a *Announcement) Name() string {
 
 // Update changes the service's text record and tells the neighbours, as
 // RFC 6762 has a changed record told. Nothing else of a service changes
-// while it is announced: a new port is a new announcement.
+// while it is announced: a new port is a new announcement. A text the
+// service could not have been announced with is ErrInvalid, and the
+// service keeps the one it has.
 //
 // A text that changes more than ten times a minute is more than the
 // protocol means to carry: the neighbours are told of the last, not of
 // each.
 func (a *Announcement) Update(ctx context.Context, text TXT) error {
 	if err := text.Validate(); err != nil {
+		return err
+	}
+
+	if err := a.service.fits(text); err != nil {
 		return err
 	}
 
@@ -215,24 +222,30 @@ func ttlOf(asked time.Duration, recommended uint32) uint32 {
 	return uint32(min(max(asked/time.Second, 1), maxTTL)) // #nosec G115 -- between one and maxTTL
 }
 
-// records is the service as its records: the PTR records that list it
-// under its type, under each of its subtypes and its type among the
-// types there are, which others may say too; and its SRV and TXT
-// records, which are its own.
+// records is the service as its records, as it now is.
 func (a *Announcement) records() []wire.Record {
-	instance := append(Name{a.name}, a.kind...)
-	long, short := ttlOf(a.service.TTL, otherTTL), ttlOf(a.service.TTL, hostTTL)
+	return a.service.records(a.kind, a.name, a.target, a.text)
+}
+
+// records is a service as its records, under a name, at a host and with
+// a text: the PTR records that list it under its type, under each of
+// its subtypes and its type among the types there are, which others may
+// say too; and its SRV and TXT records, which are its own. kind is its
+// type as a name.
+func (s *Service) records(kind Name, name string, target Name, text TXT) []wire.Record {
+	instance := append(Name{name}, kind...)
+	long, short := ttlOf(s.TTL, otherTTL), ttlOf(s.TTL, hostTTL)
 
 	records := []wire.Record{
-		{Name: a.kind, TTL: long, Data: wire.Pointer{Target: instance}},
-		{Name: Name{"_services", "_dns-sd", "_udp", local}, TTL: long, Data: wire.Pointer{Target: a.kind}},
+		{Name: kind, TTL: long, Data: wire.Pointer{Target: instance}},
+		{Name: Name{"_services", "_dns-sd", "_udp", local}, TTL: long, Data: wire.Pointer{Target: kind}},
 	}
 
-	for _, subtype := range a.service.Subtypes {
+	for _, subtype := range s.Subtypes {
 		records = append(
 			records,
 			wire.Record{
-				Name: append(Name{subtype, "_sub"}, a.kind...),
+				Name: append(Name{subtype, "_sub"}, kind...),
 				TTL:  long,
 				Data: wire.Pointer{Target: instance},
 			},
@@ -241,10 +254,36 @@ func (a *Announcement) records() []wire.Record {
 
 	return append(records,
 		wire.Record{Name: instance, TTL: short, Flush: true, Data: wire.Service{
-			Priority: a.service.Priority, Weight: a.service.Weight, Port: a.service.Port, Target: a.target,
+			Priority: s.Priority, Weight: s.Weight, Port: s.Port, Target: target,
 		}},
-		wire.Record{Name: instance, TTL: long, Flush: true, Data: a.text.wire()},
+		wire.Record{Name: instance, TTL: long, Flush: true, Data: text.wire()},
 	)
+}
+
+// fits says whether the service can be said with a text, whatever names
+// it comes to have: its own and its host's are each a label that Rename
+// may make as long as a label can be, and a name that is asked for goes
+// in one message with the records meant for it.
+func (s *Service) fits(text TXT) error {
+	label, proto, _ := serviceType(s.Type)
+	longest := strings.Repeat("x", maxLabel)
+	target := Name{longest, local}
+
+	if s.Host != "" {
+		named, err := hostName(s.Host)
+		if err != nil {
+			return err
+		}
+
+		target = named
+	}
+
+	set := engine.Set{Records: s.records(Name{label, proto, local}, longest, target, text)}
+	if err := set.Check(); err != nil {
+		return fmt.Errorf("%w: the text record is more than one message holds with the service's names", ErrInvalid)
+	}
+
+	return nil
 }
 
 // publish announces the service under the name it has, and under the

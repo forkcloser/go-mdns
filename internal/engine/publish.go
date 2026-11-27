@@ -130,8 +130,13 @@ const defaultHostTTL = 120
 // as this host's alone on a link this one wants, which is said at
 // once, or later, when such a link comes up, by Done; ErrInvalid
 // for a set that cannot be said, ctx's error when ctx ends first.
+//
+// A set that cannot be said is one with a record that fits no message,
+// which is 9000 bytes at most with its IP and UDP headers; or with a
+// name to be this host's alone that cannot be asked for in one, with
+// the records meant for it (RFC 6762 sections 8.1 and 17).
 func (e *Engine) Publish(ctx context.Context, set Set) (*Publication, error) {
-	if err := set.check(); err != nil {
+	if err := set.Check(); err != nil {
 		return nil, err
 	}
 
@@ -165,18 +170,38 @@ func (e *Engine) Publish(ctx context.Context, set Set) (*Publication, error) {
 	return published, nil
 }
 
-// check says whether a set can be said at all.
-func (s *Set) check() error {
+// largest is the most a message holds that is sent in pieces, as a
+// record that fits no message of its link's is, alone, and as the
+// question for a name is with the records meant for it (RFC 6762
+// section 17). The lesser of the two families': a set is said on links
+// of both.
+const largest = transport.MaxPacket - ipv6Headers
+
+// Check says whether a set can be said at all: each of its records in a
+// message, alone if it has to be, and each name it is to hold alone
+// asked for in one, with the records meant for it.
+func (s *Set) Check() error {
 	if len(s.Records) == 0 && len(s.Host) == 0 {
 		return fmt.Errorf("%w: nothing to publish", ErrInvalid)
 	}
 
-	trial := wire.NewBuilder(nil, wire.Header{}, wire.Options{})
-
 	for _, record := range s.Records {
-		if len(record.Name) == 0 || record.TTL == 0 || trial.Answer(record) != nil {
+		if len(record.Name) == 0 || record.TTL == 0 {
 			return fmt.Errorf("%w: a record for %q", ErrInvalid, record.Name)
 		}
+
+		// Each in a message of its own: a set is said in as many as it
+		// takes.
+		switch err := wire.NewBuilder(nil, wire.Header{}, wire.Options{Limit: largest}).Answer(record); {
+		case errors.Is(err, wire.ErrFull):
+			return fmt.Errorf("%w: a record for %q fits no message", ErrInvalid, record.Name)
+		case err != nil:
+			return fmt.Errorf("%w: a record for %q", ErrInvalid, record.Name)
+		}
+	}
+
+	if _, fit := claiming(s.Records, largest, largest); !fit {
+		return fmt.Errorf("%w: a name to hold, with its records, is more than one message asks for", ErrInvalid)
 	}
 
 	// Tried in a message of its own: a question does not follow answers
@@ -223,7 +248,7 @@ func (p *Publication) Update(records []wire.Record) error {
 	next := p.set
 	next.Records = slices.Clone(records)
 
-	if err := next.check(); err != nil {
+	if err := next.Check(); err != nil {
 		return err
 	}
 

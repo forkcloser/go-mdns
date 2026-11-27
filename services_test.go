@@ -1,11 +1,13 @@
 package mdns_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net/netip"
 	"reflect"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -774,6 +776,116 @@ func TestWhatIsDoubtedAndWhatIsRefused(t *testing.T) {
 			mdns.ErrClosed,
 		) {
 			t.Errorf("announcing on a Peer that is closed: %v", err)
+		}
+	})
+}
+
+// textOf is a text record of so many bytes, its entries told apart by
+// their keys and filled with a letter.
+func textOf(size int, fill byte) mdns.TXT {
+	var text mdns.TXT
+
+	for size > 0 {
+		entry := min(size-1, 255)
+		key := fmt.Sprintf("k%03d", len(text))
+		text = append(text, mdns.Entry{Key: key, Value: bytes.Repeat([]byte{fill}, entry-len(key)-1)})
+		size -= entry + 1
+	}
+
+	return text
+}
+
+// A name is asked for in one message with the records meant for it
+// (RFC 6762 section 8.1), and a message is 9000 bytes at most with its
+// headers (section 17): a service's text is held to what that leaves
+// when the service's name and its host's are as long as a rename may
+// make them, 63 bytes each. A text over that is refused when the
+// service is announced and when its text is changed, where it was
+// taken, the name never asked for and the service never found.
+//
+// For a service of the type _http._tcp on an IPv6 link, whose headers
+// are 48 bytes: the message's header is twelve; the question is the
+// name, 82, and four; the SRV record its name as a pointer, two, ten,
+// six, and the host's name with "local" as a pointer, 66; the TXT
+// record two and ten. 8758 are left for the text.
+func TestAServicesTextIsHeldToWhatItsNameIsAskedForWith(t *testing.T) {
+	t.Parallel()
+
+	long := mdns.Service{Name: strings.Repeat("n", 63), Type: "_http._tcp", Port: 80, Text: textOf(8758, 'a')}
+	if err := long.Validate(); err != nil {
+		t.Errorf("a text that fills the question for the longest name: %v", err)
+	}
+
+	// The bound is the same for a short name: the name may be changed
+	// for a long one.
+	short := mdns.Service{Name: "n", Type: "_http._tcp", Port: 80, Text: textOf(8759, 'a')}
+	if err := short.Validate(); !errors.Is(err, mdns.ErrInvalid) {
+		t.Errorf("a text one byte over: %v", err)
+	}
+
+	// A host that is not this one is not renamed: its name counts as
+	// it is, 3 bytes here where this host's counts for 64.
+	short.Host, short.Addrs = "g", []netip.Addr{netip.MustParseAddr("192.0.2.40")}
+	short.Text = textOf(8758+62, 'a')
+
+	if err := short.Validate(); err != nil {
+		t.Errorf("a text that fills the question, on a host with a short name: %v", err)
+	}
+
+	short.Text = textOf(8758+63, 'a')
+	if err := short.Validate(); !errors.Is(err, mdns.ErrInvalid) {
+		t.Errorf("a text one byte over, on a host with a short name: %v", err)
+	}
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		sixth := func(last string) mdnstest.Port {
+			return mdnstest.Port{
+				Interface: "en0",
+				Wire:      "lan",
+				Addrs:     []netip.Prefix{netip.MustParsePrefix("fe80::" + last + "/64")},
+			}
+		}
+
+		kitchen := peer(t, &network, strings.Repeat("h", 63), sixth("1"))
+		browser := peer(t, &network, "browser", sixth("2"))
+		found := browse(t, browser, mdns.Query{Type: "_http._tcp"})
+
+		announced, err := kitchen.Announce(t.Context(), long)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		time.Sleep(5 * time.Second)
+
+		if got := found.stands(t)[long.Name]; !reflect.DeepEqual(got.Text, long.Text) {
+			t.Errorf("found with a text of %d entries, want the %d announced", len(got.Text), len(long.Text))
+		}
+
+		if err = announced.Update(t.Context(), textOf(8759, 'b')); !errors.Is(err, mdns.ErrInvalid) {
+			t.Errorf("changed to a text one byte over: %v", err)
+		}
+
+		if err = announced.Update(t.Context(), textOf(8758, 'b')); err != nil {
+			t.Errorf("changed to another text that fills the question: %v", err)
+		}
+
+		time.Sleep(5 * time.Second)
+
+		if got := found.stands(t)[long.Name]; !reflect.DeepEqual(got.Text, textOf(8758, 'b')) {
+			t.Errorf("found with a text of %d entries after the change, want the one it was changed to", len(got.Text))
+		}
+
+		// A service with a short name is held to the same when its text
+		// is changed, though a message would carry more with that name.
+		brief, err := kitchen.Announce(t.Context(), mdns.Service{Name: "n", Type: "_http._tcp", Port: 81})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err = brief.Update(t.Context(), textOf(8759, 'a')); !errors.Is(err, mdns.ErrInvalid) {
+			t.Errorf("a service with a short name, changed to a text one byte over: %v", err)
 		}
 	})
 }

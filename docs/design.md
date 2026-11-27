@@ -234,7 +234,7 @@ MTU (§17), and the IP TTL of what a link sends (§11).
 | §14 interfaces | defends its name on every interface, and takes another on all of them when it loses on one; keeps apart two hosts of one name on two links |
 | §15 sharing the port | shares port 5353 with the system's responder |
 | §16 names | UTF-8, compared as DNS does: ASCII letters without their case, every other byte as it is |
-| §17 messages | to the link's MTU, headers counted; one record alone up to 9000 bytes, headers counted |
+| §17 messages | to the link's MTU, headers counted; one record alone up to 9000 bytes, headers counted; refuses to publish a record over that, and a name whose records do not fit the one message it is asked for in |
 | §18 format | an ID of zero, and none looked at; answers marked authoritative; names compressed, in the data of an SRV record too, and read so |
 
 | RFC 6763 | A Peer |
@@ -299,7 +299,6 @@ What is known not to be done is in the tracker, each with what done looks like:
   (RFC 6762 §15.1).
 - [No conformance run](https://github.com/forkcloser/go-mdns/issues/13) against a
   reference responder or a test suite.
-- [A probe too large for one packet](https://github.com/forkcloser/go-mdns/issues/14).
 - [Only the wire parser is fuzzed](https://github.com/forkcloser/go-mdns/issues/15).
 - [Which IPv6 addresses are announced](https://github.com/forkcloser/go-mdns/issues/16).
 
