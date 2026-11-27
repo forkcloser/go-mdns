@@ -87,12 +87,14 @@ func (q *Query) names() (asked, error) {
 		names.listing = append(Name{q.Subtype, "_sub"}, names.kind...)
 	}
 
+	// Any label: what is looked for is what another host announced, and
+	// not every host holds its names to text.
 	if q.Name != "" {
-		if err = instanceLabel(q.Name); err != nil {
+		names.instance = append(Name{q.Name}, names.kind...)
+
+		if err = names.instance.Validate(); err != nil {
 			return asked{}, err
 		}
-
-		names.instance = append(Name{q.Name}, names.kind...)
 	}
 
 	return names, nil

@@ -133,35 +133,38 @@ func (p *Peer) Browse(ctx context.Context, query Query, handle func(Change, Inst
 // it said it was, which the Peer cannot know by itself. Its records are
 // asked for again at once, and forgotten if no one answers within ten
 // seconds, however long they were said to last: a Browse then tells of
-// it as lost. It returns at once, and ErrClosed from a Peer that is.
+// it as lost. It takes any Instance a Browse told of; of one found with
+// Query.Unresolved, which says no host, it asks whether it is still
+// listed. It returns at once, and ErrClosed from a Peer that is.
 func (p *Peer) Reconfirm(doubted Instance) error {
 	service, proto, err := serviceType(doubted.Type)
 	if err != nil {
 		return err
 	}
 
-	if err = instanceLabel(doubted.Name); err != nil {
-		return err
-	}
-
-	host, err := hostName(doubted.Host)
-	if err != nil {
-		return err
-	}
-
+	// Under any label: the instance is one another host announced, and
+	// not every host holds its names to text.
 	kind := Name{service, proto, local}
 	instance := append(Name{doubted.Name}, kind...)
+	records := []wire.Record{{Name: kind, Data: wire.Pointer{Target: instance}}}
 
-	records := []wire.Record{
-		{Name: kind, Data: wire.Pointer{Target: instance}},
-		{
+	// An instance found with Query.Unresolved says no more than that it
+	// is listed.
+	if doubted.Host != "" {
+		var host Name
+
+		if host, err = foundHost(doubted.Host); err != nil {
+			return err
+		}
+
+		records = append(records, wire.Record{
 			Name: instance,
 			Data: wire.Service{Priority: doubted.Priority, Weight: doubted.Weight, Port: doubted.Port, Target: host},
-		},
-	}
+		})
 
-	for _, addr := range doubted.Addrs {
-		records = append(records, wire.Record{Name: host, Data: wire.Address{Addr: addr.WithZone("")}})
+		for _, addr := range doubted.Addrs {
+			records = append(records, wire.Record{Name: host, Data: wire.Address{Addr: addr.WithZone("")}})
+		}
 	}
 
 	for _, record := range records {
@@ -203,13 +206,15 @@ func (p *Peer) Resolve(ctx context.Context, name, service string) (Instance, err
 	return Instance{}, err
 }
 
-// LookupHost finds where a host is: "printer.local", or "printer". It
-// returns the addresses known a moment after the first one is, so that
+// LookupHost finds where a host is: "printer.local", or "printer". A
+// name of more than one label is looked for as it is written, since the
+// host a service says it is on may be under another name than "local".
+// It returns the addresses known a moment after the first one is, so that
 // a host with both an IPv4 and an IPv6 address is given a chance to say
 // both. An IPv6 link-local address carries its zone. It asks until ctx
 // ends, and then returns ctx's error.
 func (p *Peer) LookupHost(ctx context.Context, host string) ([]netip.Addr, error) {
-	name, err := hostName(host)
+	name, err := foundHost(host)
 	if err != nil {
 		return nil, err
 	}
