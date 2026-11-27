@@ -195,6 +195,13 @@ func (g *Group) Add(question Question) (int, error) {
 		number = g.last
 		g.watchers[number] = &watcher{interfaces: question.Interfaces, told: map[string]Answer{}, dirty: g.dirty}
 		g.engine.watch(g.watchers[number], asked)
+
+		// What is already known of it is something to tell: whoever
+		// waits is not to wait for the next thing heard.
+		select {
+		case g.dirty <- struct{}{}:
+		default:
+		}
 	})
 
 	return number, err
