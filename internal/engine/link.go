@@ -38,6 +38,8 @@ type link struct {
 	// it; denials the records that say which types its names have.
 	standing []*standing
 	out      map[*owned]time.Time
+	// asked counts the questions matched to what stands on the link.
+	asked    uint64
 	replying *timer
 	held     map[netip.Addr]*held
 	denials  map[string]*owned

@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"reflect"
 	"slices"
+	"strconv"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1206,6 +1207,407 @@ func TestWhatComesFromAnotherPort(t *testing.T) {
 
 		if again := other.next(); again.at.Sub(first.at) != time.Second {
 			t.Errorf("asked again %s after the first", again.at.Sub(first.at))
+		}
+	})
+}
+
+// types is the record that lists the type of the services: one that
+// every service of the type says (RFC 6763 section 9).
+func types() wire.Record {
+	return wire.Record{
+		Name: []string{"_services", "_dns-sd", "_udp", "local"}, Class: wire.ClassIN, TTL: 4500,
+		Data: wire.Pointer{Kind: wire.TypePTR, Target: typeName()},
+	}
+}
+
+// pointed is how often each pointer was said in what a neighbour heard
+// in the ten seconds that follow, by the first label of what it points
+// to, and with what life.
+func pointed(other *neighbour) map[string][]uint32 {
+	time.Sleep(10 * time.Second)
+	synctest.Wait()
+
+	lives := map[string][]uint32{}
+
+	for len(other.heard) > 0 {
+		for _, answer := range (<-other.heard).Answers {
+			if target, ok := answer.Data.(wire.Pointer); ok {
+				lives[target.Target[0]] = append(lives[target.Target[0]], answer.TTL)
+			}
+		}
+	}
+
+	return lives
+}
+
+// A record others may say too that two sets hold is one record on a
+// link: a question for it is answered with it once, and it is said
+// goodbye to when the last of the sets that have it is withdrawn, not
+// the first. Two services of one type hold such a record, the one that
+// lists their type (RFC 6763 section 9).
+func TestARecordTwoSetsSayIsOneRecord(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		other := join(t, &network, port("en0", lan, 2))
+		host := open(t, engine.Config{Network: network.Host(port("en0", lan, 1))})
+
+		types := types()
+
+		kitchen := settled(t, host, other, engine.Set{Records: []wire.Record{types, pointer("Kitchen", 4500)}})
+		garden := settled(t, host, other, engine.Set{Records: []wire.Record{types, pointer("Garden", 4500)}})
+
+		time.Sleep(time.Minute)
+		other.drain()
+
+		said := func() map[string][]uint32 { return pointed(other) }
+
+		other.ask(t, query(types.Name, wire.TypePTR))
+
+		if got := said(); !reflect.DeepEqual(got, map[string][]uint32{"_http": {4500}}) {
+			t.Errorf("asked for the types, told %v; want the one type, once", got)
+		}
+
+		// And to the asker alone, which is said without the link's own
+		// look at what it is about to say.
+		alone := query(types.Name, wire.TypePTR)
+		alone.Unicast = true
+		other.ask(t, alone)
+
+		if got := said(); !reflect.DeepEqual(got, map[string][]uint32{"_http": {4500}}) {
+			t.Errorf("asked for the types, for an answer of its own, told %v; want the one type, once", got)
+		}
+
+		time.Sleep(time.Minute)
+
+		// Withdrawn while a question for the type has yet to be answered:
+		// the set that still has the record answers it.
+		other.ask(t, query(types.Name, wire.TypePTR))
+		synctest.Wait()
+
+		if err := kitchen.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := said(); !reflect.DeepEqual(got, map[string][]uint32{"Kitchen": {0}, "_http": {4500}}) {
+			t.Errorf("one of the two withdrawn, told %v; want goodbye for its instance alone, and the type", got)
+		}
+
+		time.Sleep(time.Minute)
+		other.ask(t, query(types.Name, wire.TypePTR))
+
+		if got := said(); !reflect.DeepEqual(got, map[string][]uint32{"_http": {4500}}) {
+			t.Errorf("asked for the types after one was withdrawn, told %v; want the type still", got)
+		}
+
+		time.Sleep(time.Minute)
+
+		if err := garden.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := said(); !reflect.DeepEqual(got, map[string][]uint32{"Garden": {0}, "_http": {0}}) {
+			t.Errorf("the last withdrawn, told %v; want goodbye for its instance and for the type", got)
+		}
+	})
+}
+
+// The set that drops such a record while another has it takes nothing
+// back, and the other, withdrawn after, takes it back.
+func TestARecordOneSetDropsIsStillTheOthers(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		other := join(t, &network, port("en0", lan, 2))
+		host := open(t, engine.Config{Network: network.Host(port("en0", lan, 1))})
+
+		kitchen := settled(t, host, other, engine.Set{Records: []wire.Record{types(), pointer("Kitchen", 4500)}})
+		garden := settled(t, host, other, engine.Set{Records: []wire.Record{types(), pointer("Garden", 4500)}})
+
+		time.Sleep(time.Minute)
+		other.drain()
+
+		if err := garden.Update([]wire.Record{pointer("Garden", 4500)}); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := pointed(other); !reflect.DeepEqual(got, map[string][]uint32{"Garden": {4500, 4500, 4500}}) {
+			t.Errorf("one of the two no longer says the type, told %v; want what it still says, thrice", got)
+		}
+
+		time.Sleep(time.Minute)
+		other.ask(t, query(types().Name, wire.TypePTR))
+
+		if got := pointed(other); !reflect.DeepEqual(got, map[string][]uint32{"_http": {4500}}) {
+			t.Errorf("asked for the types, told %v; want the type the other set still says", got)
+		}
+
+		time.Sleep(time.Minute)
+
+		if err := kitchen.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := pointed(other); !reflect.DeepEqual(got, map[string][]uint32{"Kitchen": {0}, "_http": {0}}) {
+			t.Errorf("the last to say the type withdrawn, told %v; want goodbye for its instance and the type", got)
+		}
+	})
+}
+
+// A set may be the last to have a record it never said: one that
+// another set said, since gone, while this one was still asking for its
+// name. The record is taken back when that set ends, however it ends,
+// or drops it.
+func TestARecordAnotherSetSaidIsTakenBackByTheLast(t *testing.T) {
+	t.Parallel()
+
+	// named is a service's records with one that is its own, which is
+	// asked for before any of them is said.
+	named := func(instance string) []wire.Record {
+		return []wire.Record{
+			types(), pointer(instance, 4500),
+			{
+				Name: []string{instance, "_http", "_tcp", "local"}, Class: wire.ClassIN, TTL: 4500, Flush: true,
+				Data: wire.Text{Strings: []string{"path=/"}},
+			},
+		}
+	}
+
+	// asking is a host on which Kitchen is said and Garden published a
+	// moment ago, its name still asked for.
+	asking := func(t *testing.T) (*neighbour, *engine.Engine, *engine.Publication, context.CancelFunc, <-chan error) {
+		t.Helper()
+
+		var network mdnstest.Network
+
+		other := join(t, &network, port("en0", lan, 2))
+		host := open(t, engine.Config{Network: network.Host(port("en0", lan, 1))})
+		kitchen := settled(t, host, other, engine.Set{Records: []wire.Record{types(), pointer("Kitchen", 4500)}})
+
+		time.Sleep(time.Minute)
+		other.drain()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
+
+		ended := make(chan error, 1)
+
+		go func() {
+			_, err := host.Publish(ctx, engine.Set{Records: named("Garden")})
+			ended <- err
+		}()
+
+		time.Sleep(300 * time.Millisecond)
+		synctest.Wait()
+
+		select {
+		case err := <-ended:
+			t.Fatalf("Garden is no longer asking for its name: %v", err)
+		default:
+		}
+
+		return other, host, kitchen, cancel, ended
+	}
+
+	t.Run("the Engine closed", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			other, host, _, _, ended := asking(t)
+
+			if err := host.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := <-ended; !errors.Is(err, engine.ErrClosed) {
+				t.Errorf("Publish on an Engine closed meanwhile: %v", err)
+			}
+
+			if got := pointed(other); !reflect.DeepEqual(got, map[string][]uint32{"Kitchen": {0}, "_http": {0}}) {
+				t.Errorf("told %v; want goodbye for the instance that was said, and for the type", got)
+			}
+		})
+	})
+
+	t.Run("the set given up", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			other, _, kitchen, cancel, ended := asking(t)
+
+			if err := kitchen.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			cancel()
+
+			if err := <-ended; !errors.Is(err, context.Canceled) {
+				t.Errorf("Publish given up: %v", err)
+			}
+
+			if got := pointed(other); !reflect.DeepEqual(got, map[string][]uint32{"Kitchen": {0}, "_http": {0}}) {
+				t.Errorf("told %v; want goodbye for what was said, the type once, and for nothing else", got)
+			}
+		})
+	})
+
+	t.Run("its name another host's", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			other, _, kitchen, _, ended := asking(t)
+
+			if err := kitchen.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			other.drain()
+
+			theirs := named("Garden")[2]
+			theirs.Data = wire.Text{Strings: []string{"path=/theirs"}}
+			other.answer(t, "en0", theirs)
+
+			if err := <-ended; !errors.Is(err, engine.ErrConflict) {
+				t.Errorf("Publish of a name another host has: %v", err)
+			}
+
+			if got := pointed(other); !reflect.DeepEqual(got, map[string][]uint32{"_http": {0}}) {
+				t.Errorf("told %v; want goodbye for the type, and for nothing that was never said", got)
+			}
+		})
+	})
+
+	t.Run("the record dropped", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			var network mdnstest.Network
+
+			other := join(t, &network, port("en0", lan, 2))
+			host := open(t, engine.Config{Network: network.Host(port("en0", lan, 1))})
+			garden := settled(t, host, other, engine.Set{Records: named("Garden")})
+
+			time.Sleep(time.Minute)
+			other.drain()
+
+			// Its name is said by another host: it asks for it again, and
+			// is not answered for meanwhile.
+			theirs := named("Garden")[2]
+			theirs.Data = wire.Text{Strings: []string{"path=/theirs"}}
+			other.answer(t, "en0", theirs)
+			synctest.Wait()
+
+			if err := garden.Update(named("Garden")[1:]); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := pointed(other)["_http"]; !reflect.DeepEqual(got, []uint32{0}) {
+				t.Errorf("the type dropped while the name is asked for again: the type said %v, want goodbye", got)
+			}
+		})
+	})
+}
+
+// What is taken back when a set ends is what was said of it, to anyone
+// and in any part of an answer: not a record that was changed and has
+// yet to be said, and a record that was only said along with another.
+func TestWhatIsTakenBackIsWhatWasSaid(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		other := join(t, &network, port("en0", lan, 2))
+		host := open(t, engine.Config{Network: network.Host(port("en0", lan, 1))})
+		kitchen := settled(t, host, other, engine.Set{Records: service()})
+
+		time.Sleep(time.Minute)
+
+		// Said at once, and what comes in the six seconds after waits.
+		if err := kitchen.Update(service()); err != nil {
+			t.Fatal(err)
+		}
+
+		time.Sleep(4 * time.Second)
+
+		moved := service()
+		moved[1].Data = wire.Service{Port: 9090, Target: hostName()}
+
+		if err := kitchen.Update(append(moved, types())); err != nil {
+			t.Fatal(err)
+		}
+
+		other.drain()
+
+		// goodbyes is the records said with no life left in what the
+		// neighbour has heard since, and said is the others.
+		heard := func() (said, goodbyes []string) {
+			synctest.Wait()
+
+			for len(other.heard) > 0 {
+				message := <-other.heard
+
+				for _, record := range slices.Concat(message.Answers, message.Additionals) {
+					var what string
+
+					switch data := record.Data.(type) {
+					case wire.Pointer:
+						what = "the pointer to " + data.Target[0]
+					case wire.Service:
+						what = "the service at " + strconv.Itoa(int(data.Port))
+					case wire.Text:
+						what = "the text"
+					default:
+						continue
+					}
+
+					if record.TTL == 0 {
+						goodbyes = append(goodbyes, what)
+					} else {
+						said = append(said, what)
+					}
+				}
+			}
+
+			slices.Sort(said)
+			slices.Sort(goodbyes)
+
+			return said, goodbyes
+		}
+
+		// The service as it now is goes with the pointer to it.
+		other.ask(t, query(typeName(), wire.TypePTR))
+		time.Sleep(time.Second)
+
+		want := []string{"the pointer to Kitchen", "the service at 9090", "the text"}
+		if said, goodbyes := heard(); !slices.Equal(said, want) || goodbyes != nil {
+			t.Fatalf("asked for the type, told %v and goodbye for %v; want %v", said, goodbyes, want)
+		}
+
+		// The type's record was never said: dropped, nothing is taken
+		// back.
+		if err := kitchen.Update(moved); err != nil {
+			t.Fatal(err)
+		}
+
+		if said, goodbyes := heard(); said != nil || goodbyes != nil {
+			t.Errorf("a record dropped before it was said: told %v and goodbye for %v", said, goodbyes)
+		}
+
+		if err := kitchen.Update(append(moved, types())); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := kitchen.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		if said, goodbyes := heard(); said != nil || !slices.Equal(goodbyes, want) {
+			t.Errorf("withdrawn, told %v and goodbye for %v; want goodbye for %v", said, goodbyes, want)
 		}
 	})
 }

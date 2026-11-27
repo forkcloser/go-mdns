@@ -85,9 +85,32 @@ type owned struct {
 	seq int
 	// told is when it was last said to all on its link.
 	told time.Time
+	// given says it was said to someone on its link, in an answer of
+	// any kind: there is then someone to say goodbye to for it.
+	given bool
+	// asked is the last question it was matched to, of those its link
+	// counts: a record others may say too is one record on a link,
+	// held by every standing that has it, and answers a question once.
+	asked uint64
 }
 
 func (o *owned) unique() bool { return o.record.Flush }
+
+// answers says whether the record is of the type a question asks for.
+func (o *owned) answers(kind uint16) bool { return kind == wire.TypeANY || kind == o.record.Type() }
+
+// first says whether a question is matched to the record for the first
+// time, and counts it so: a record several standings have is found in
+// each.
+func (o *owned) first(question uint64) bool {
+	if o.asked == question {
+		return false
+	}
+
+	o.asked = question
+
+	return true
+}
 
 // is says whether the record is the same as another: name, type, data.
 func (o *owned) is(key string, kind uint16, raw []byte) bool {
@@ -385,11 +408,41 @@ func (e *Engine) resolve(stood *standing) []*owned {
 			continue
 		}
 
+		// What others may say too, and another set says here already,
+		// is that record: said once, and for as long as one set has it.
+		if said := stood.link.said(key, record.Type(), raw); said != nil && !record.Flush {
+			resolved = append(resolved, said)
+
+			continue
+		}
+
 		e.seq++
 		resolved = append(resolved, &owned{record: record, raw: raw, key: key, seq: e.seq})
 	}
 
 	return resolved
+}
+
+// said is the record others may say too that a standing of the link
+// has, of this name, type and data.
+func (l *link) said(key string, kind uint16, raw []byte) *owned {
+	for _, stood := range l.standing {
+		for _, record := range stood.records {
+			if !record.unique() && record.is(key, kind, raw) {
+				return record
+			}
+		}
+	}
+
+	return nil
+}
+
+// kept says whether a record a standing had is another's too: it then
+// stays what it was, said and to be said.
+func (l *link) kept(record *owned, but *standing) bool {
+	return slices.ContainsFunc(l.standing, func(stood *standing) bool {
+		return stood != but && slices.Contains(stood.records, record)
+	})
 }
 
 // addresses is the addresses of an interface, of both families, that
@@ -472,7 +525,7 @@ func (e *Engine) readdressed(stood *standing) {
 // longer has.
 func forget(stood *standing, before []*owned) {
 	for _, old := range before {
-		if !slices.Contains(stood.records, old) {
+		if !slices.Contains(stood.records, old) && !stood.link.kept(old, stood) {
 			delete(stood.link.out, old)
 		}
 	}
@@ -512,14 +565,10 @@ func (e *Engine) update(published *Publication, records []wire.Record) error {
 		forget(stood, before)
 
 		// What others may say too is not replaced by what is new: it is
-		// said goodbye to.
-		gone := slices.DeleteFunc(slices.Clone(before), func(old *owned) bool {
-			return old.unique() || slices.Contains(stood.records, old)
-		})
-
-		if stood.live {
-			stood.link.respond(gone, true)
-		}
+		// said goodbye to, by whichever set said it.
+		stood.link.respond(slices.DeleteFunc(slices.Clone(before), func(old *owned) bool {
+			return old.unique() || !old.given || slices.Contains(stood.records, old) || stood.link.kept(old, stood)
+		}), true)
 	}
 
 	// Said now, or as soon as ten a minute allows.
@@ -569,17 +618,15 @@ func (e *Engine) end(published *Publication, why error) {
 	for via, stood := range published.stands {
 		e.cancel(stood.timer)
 
-		if stood.said > 0 {
-			gone := stood.records
-			if !stood.live {
-				gone = slices.DeleteFunc(slices.Clone(gone), (*owned).unique)
-			}
+		// What another set says here too is not gone; and what others
+		// may say too may have been said by a set that is gone, this one
+		// having said nothing yet.
+		via.respond(slices.DeleteFunc(slices.Clone(stood.records), func(old *owned) bool {
+			return via.kept(old, stood) || !old.given || !stood.live && old.unique()
+		}), true)
 
-			via.respond(gone, true)
-		}
-
-		forget(&standing{link: via}, stood.records)
 		via.standing = slices.DeleteFunc(via.standing, func(one *standing) bool { return one == stood })
+		forget(&standing{link: via}, stood.records)
 		via.denials = nil
 	}
 
