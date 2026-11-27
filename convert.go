@@ -87,10 +87,17 @@ func (r Record) wire() (wire.Record, error) {
 		return wire.Record{}, fmt.Errorf("%w: a TTL of %s", ErrInvalid, r.TTL)
 	}
 
+	// A second at least for a TTL that is said: none is "not said", and
+	// is given the type's own.
+	seconds := r.TTL / time.Second
+	if r.TTL > 0 {
+		seconds = max(seconds, 1)
+	}
+
 	return wire.Record{
 		Name:  r.Name,
 		Class: wire.ClassIN,
-		TTL:   uint32(min(r.TTL/time.Second, maxTTL)), // #nosec G115 -- at most maxTTL
+		TTL:   uint32(min(seconds, maxTTL)), // #nosec G115 -- at most maxTTL
 		Data:  data,
 	}, nil
 }
