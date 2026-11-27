@@ -2,9 +2,11 @@ package wire_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -336,5 +338,208 @@ func TestDataIsWrittenAloneWithNothingCompressed(t *testing.T) {
 
 	if _, err = wire.AppendData(nil, nil); !errors.Is(err, wire.ErrInvalid) {
 		t.Errorf("no data: %v", err)
+	}
+}
+
+// naive writes a message of one question and of PTR records the way the
+// format's rule reads: each end of a name that was written before, and
+// that a pointer can reach, is a pointer to the first place it was
+// written, found by looking at every label written, one by one.
+type naive struct {
+	buf  []byte
+	seen []int
+}
+
+func (n *naive) labelsAt(offset int) ([]string, bool) {
+	var labels []string
+
+	for offset < len(n.buf) {
+		size := int(n.buf[offset])
+
+		switch {
+		case size == 0:
+			return labels, true
+		case size >= 0xc0:
+			offset = int(binary.BigEndian.Uint16(n.buf[offset:])) & 0x3fff
+		case offset+1+size > len(n.buf):
+			return nil, false
+		default:
+			labels = append(labels, string(n.buf[offset+1:offset+1+size]))
+			offset += 1 + size
+		}
+	}
+
+	return nil, false
+}
+
+func (n *naive) name(labels []string) {
+	for index, label := range labels {
+		for _, at := range n.seen {
+			if written, whole := n.labelsAt(at); whole && slices.Equal(written, labels[index:]) {
+				n.buf = binary.BigEndian.AppendUint16(n.buf, 0xc000|uint16(at))
+
+				return
+			}
+		}
+
+		if len(n.buf) <= 0x3fff {
+			n.seen = append(n.seen, len(n.buf))
+		}
+
+		n.buf = append(append(n.buf, byte(len(label))), label...)
+	}
+
+	n.buf = append(n.buf, 0)
+}
+
+func (n *naive) message(question []string, targets [][]string) []byte {
+	n.buf = []byte{0, 0, 0, 0, 0, 1, byte(len(targets) >> 8), byte(len(targets)), 0, 0, 0, 0}
+	n.name(question)
+	n.buf = append(n.buf, 0, 12, 0, 1)
+
+	for _, target := range targets {
+		n.name(question)
+		n.buf = append(n.buf, 0, 12, 0, 1, 0, 0, 0x0f, 0xa0, 0, 0)
+		length := len(n.buf)
+		n.name(target)
+		binary.BigEndian.PutUint16(n.buf[length-2:], uint16(len(n.buf)-length))
+	}
+
+	return n.buf
+}
+
+// RFC 1035 section 4.1.4: a name ends in a pointer to where its end was
+// written before. Whatever the names of a message share (a long run of
+// equal labels, a label repeated, the letters and not their case), the
+// message is, byte for byte, the one a writer that looks at every label
+// written would make.
+func TestNamesAreCompressedAsALookAtEveryLabelWould(t *testing.T) {
+	t.Parallel()
+
+	kind := []string{"_http", "_tcp", "local"}
+
+	long := func(own string) []string {
+		return append(append(slices.Repeat([]string{"a"}, 116), own), kind...)
+	}
+
+	for what, targets := range map[string][][]string{
+		"instances":                 {append([]string{"Kitchen"}, kind...), append([]string{"Garden"}, kind...)},
+		"the same name twice":       {append([]string{"Kitchen"}, kind...), append([]string{"Kitchen"}, kind...)},
+		"a long run of one label":   {long("001"), long("002"), long("003"), long("004")},
+		"a label repeated":          {{"a", "a", "a", "local"}, {"a", "a", "local"}, {"a", "a", "a", "a", "local"}},
+		"the letters, another case": {{"Kitchen", "_HTTP", "_tcp", "local"}, {"kitchen", "_http", "_tcp", "LOCAL"}},
+		"an end inside another":     {{"b", "_tcp", "local"}, {"c", "local"}, {"local"}},
+	} {
+		t.Run(what, func(t *testing.T) {
+			t.Parallel()
+
+			message := wire.NewBuilder(nil, wire.Header{}, wire.Options{})
+			if err := message.Question(wire.Question{Name: kind, Type: wire.TypePTR, Class: wire.ClassIN}); err != nil {
+				t.Fatal(err)
+			}
+
+			for _, target := range targets {
+				record := wire.Record{
+					Name:  kind,
+					Class: wire.ClassIN,
+					TTL:   4000,
+					Data:  wire.Pointer{Kind: wire.TypePTR, Target: target},
+				}
+				if err := message.Answer(record); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if want := (&naive{}).message(kind, targets); !bytes.Equal(message.Bytes(), want) {
+				t.Errorf("the message is %d bytes:\n%q\nwant the %d of a look at every label:\n%q",
+					len(message.Bytes()), message.Bytes(), len(want), want)
+			}
+		})
+	}
+}
+
+// A record that does not fit is taken back whole, the places of its
+// names with it: a name it wrote is written again by the record that
+// follows, and pointed to there by the next.
+func TestANameTakenBackIsWrittenAndPointedToAgain(t *testing.T) {
+	t.Parallel()
+
+	kind := []string{"_http", "_tcp", "local"}
+	kept := append([]string{"kept"}, kind...)
+
+	message := wire.NewBuilder(nil, wire.Header{}, wire.Options{Limit: 100})
+	if err := message.Question(wire.Question{Name: kind, Type: wire.TypePTR, Class: wire.ClassIN}); err != nil {
+		t.Fatal(err)
+	}
+
+	refused := wire.Record{
+		Name: kind, Class: wire.ClassIN, TTL: 4000,
+		Data: wire.Pointer{Kind: wire.TypePTR, Target: append([]string{strings.Repeat("x", 60)}, kept...)},
+	}
+	if err := message.Answer(refused); !errors.Is(err, wire.ErrFull) {
+		t.Fatalf("a record over the limit: %v, want ErrFull", err)
+	}
+
+	for range 2 {
+		record := wire.Record{
+			Name:  kind,
+			Class: wire.ClassIN,
+			TTL:   4000,
+			Data:  wire.Pointer{Kind: wire.TypePTR, Target: kept},
+		}
+		if err := message.Answer(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if want := (&naive{}).message(kind, [][]string{kept, kept}); !bytes.Equal(message.Bytes(), want) {
+		t.Errorf(
+			"after a record taken back the message is\n%q\nwant what it is with no such record:\n%q",
+			message.Bytes(),
+			want,
+		)
+	}
+}
+
+// A name written in full more than once, as the target of an SRV record
+// is in an answer to a resolver, is pointed to where it was first.
+func TestANameWrittenTwiceInFullIsPointedToWhereItWasFirst(t *testing.T) {
+	t.Parallel()
+
+	message := wire.NewBuilder(nil, wire.Header{Response: true}, wire.Options{Legacy: true})
+
+	for _, owner := range []string{"one", "two"} {
+		record := wire.Record{
+			Name:  []string{owner, "example"},
+			Class: wire.ClassIN,
+			TTL:   10,
+			Data:  wire.Service{Port: 80, Target: host()},
+		}
+		if err := message.Answer(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pointed := wire.Record{
+		Name:  []string{"three", "example"},
+		Class: wire.ClassIN,
+		TTL:   10,
+		Data:  wire.Pointer{Kind: wire.TypePTR, Target: host()},
+	}
+	if err := message.Answer(pointed); err != nil {
+		t.Fatal(err)
+	}
+
+	written := message.Bytes()
+	first := bytes.Index(written, []byte("\x07kitchen\x05local\x00"))
+	second := bytes.LastIndex(written, []byte("\x07kitchen\x05local\x00"))
+
+	if first < 0 || second == first {
+		t.Fatalf("test premise broken: the target is in full at %d and %d of\n%q", first, second, written)
+	}
+
+	if got := int(binary.BigEndian.Uint16(written[len(written)-2:])); got != 0xc000|first {
+		t.Errorf("the name is pointed to at %d, want %d, where it was first written (it is also at %d)",
+			got&0x3fff, first, second)
 	}
 }
