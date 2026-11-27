@@ -38,7 +38,12 @@ const (
 // held is what a link means to answer to a question that was cut short,
 // once the rest of what its asker knows has come.
 type held struct {
+	// records is what was to be said when the question came, the sets
+	// that are this host's alone whole, and known those of them its
+	// asker has said it knows, then or since: a set is weighed when all
+	// has come, and said whole or not at all.
 	records []*owned
+	known   map[*owned]struct{}
 	timer   *timer
 }
 
@@ -113,7 +118,7 @@ func (e *Engine) carry(heard *link, arrived arrival, planned plan) {
 	}
 
 	if arrived.message.Header.Truncated && len(planned.answers) > 0 {
-		e.hold(heard, arrived.from.Addr().WithZone(""), planned.answers)
+		e.hold(heard, arrived.from.Addr().WithZone(""), planned.answers, arrived.message.Answers)
 
 		return
 	}
@@ -131,7 +136,7 @@ func (e *Engine) continued(heard *link, source netip.Addr, message wire.Message)
 		return
 	}
 
-	waiting.records = slices.DeleteFunc(waiting.records, func(one *owned) bool { return knows(message.Answers, one) })
+	waiting.learn(message.Answers)
 
 	if message.Header.Truncated {
 		e.cancel(waiting.timer)
@@ -175,8 +180,10 @@ func (p *plan) take(heard *link, arrived arrival, question wire.Question, now ti
 	matched := heard.matching(question)
 	p.whole = p.whole && len(matched) > 0
 
-	for _, record := range matched {
-		if knows(arrived.message.Answers, record) {
+	said := unknown(matched, func(record *owned) bool { return knows(arrived.message.Answers, record) })
+
+	for index, record := range matched {
+		if !said[index] {
 			continue
 		}
 
@@ -234,6 +241,39 @@ func (p *plan) once(record *owned, alone bool) bool {
 // between is a wait chosen at random between two.
 func between(least, most time.Duration) time.Duration {
 	return least + rand.N(most-least) // #nosec G404 -- a delay, not a secret
+}
+
+// unknown says which of the records that answer an asker are to be said
+// to one that knows some of them. What others may say too is left out
+// record by record (7.1). What is this host's alone is said whole or
+// not at all (10.2), a set being the records of a name and a type: one
+// said in part, with the bit that has its hearers forget the rest,
+// takes from every other neighbour the members the asker knew.
+func unknown(matched []*owned, known func(*owned) bool) []bool {
+	type set struct {
+		key  string
+		kind uint16
+	}
+
+	setOf := func(record *owned) set { return set{record.key, record.record.Type()} }
+	said := make([]bool, len(matched))
+	partly := map[set]struct{}{}
+
+	for index, record := range matched {
+		said[index] = !known(record)
+
+		if said[index] && record.unique() {
+			partly[setOf(record)] = struct{}{}
+		}
+	}
+
+	for index, record := range matched {
+		if _, whole := partly[setOf(record)]; record.unique() && whole {
+			said[index] = true
+		}
+	}
+
+	return said
 }
 
 // knows says whether what an asker says it knows holds a record, with
@@ -385,14 +425,14 @@ func (l *link) denial(key string) *owned {
 
 // hold keeps what is to be answered to a question that was cut short,
 // until the rest of what its asker knows has come.
-func (e *Engine) hold(heard *link, source netip.Addr, answers []*owned) {
+func (e *Engine) hold(heard *link, source netip.Addr, answers []*owned, known []wire.Record) {
 	if heard.held == nil {
 		heard.held = map[netip.Addr]*held{}
 	}
 
 	waiting := heard.held[source]
 	if waiting == nil {
-		waiting = &held{}
+		waiting = &held{known: map[*owned]struct{}{}}
 		heard.held[source] = waiting
 	}
 
@@ -402,8 +442,18 @@ func (e *Engine) hold(heard *link, source netip.Addr, answers []*owned) {
 		}
 	}
 
+	waiting.learn(known)
 	e.cancel(waiting.timer)
 	waiting.timer = e.after(between(cutLeast, cutMost), func() { e.release(heard, source) })
+}
+
+// learn takes more of what the asker of a question cut short knows.
+func (h *held) learn(known []wire.Record) {
+	for _, record := range h.records {
+		if knows(known, record) {
+			h.known[record] = struct{}{}
+		}
+	}
 }
 
 // release says what was held for a question cut short, less what its
@@ -416,8 +466,16 @@ func (e *Engine) release(heard *link, source netip.Addr) {
 
 	delete(heard.held, source)
 
-	for _, record := range waiting.records {
-		e.reply(heard, record, e.now, false)
+	said := unknown(waiting.records, func(record *owned) bool {
+		_, known := waiting.known[record]
+
+		return known
+	})
+
+	for index, record := range waiting.records {
+		if said[index] {
+			e.reply(heard, record, e.now, false)
+		}
 	}
 }
 
