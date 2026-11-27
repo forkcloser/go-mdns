@@ -12,10 +12,11 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/forkcloser/go-xos"
 
 	"github.com/forkcloser/go-mdns"
 	"github.com/forkcloser/go-mdns/transport"
@@ -364,7 +365,7 @@ func (s *source) load(ctx context.Context, env *Environment) (wanted, error) {
 			return wanted{}, fmt.Errorf("reading standard input: %w", context.Cause(ctx))
 		}
 	default:
-		written, err := os.ReadFile(s.path)
+		written, err := xos.ReadFile(s.path)
 		if err != nil {
 			return wanted{}, fmt.Errorf("reading the document: %w", err)
 		}
