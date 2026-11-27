@@ -2,6 +2,7 @@ package mdns
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -126,14 +127,49 @@ func wireData(written Data) (wire.Data, error) {
 
 		return wire.NSEC{Next: data.Next, Types: types}, data.Next.Validate()
 	case Raw:
-		if data.Kind == 0 || data.Kind == TypeANY {
-			return nil, fmt.Errorf("%w: a record of type %d", ErrInvalid, data.Kind)
-		}
-
-		return wire.Opaque{Kind: uint16(data.Kind), Bytes: data.Bytes}, nil
+		return rawData(data)
 	default:
 		return nil, fmt.Errorf("%w: a record with no data", ErrInvalid)
 	}
+}
+
+// rawData is a record given as its bytes. They are held to what this
+// package writes for what it reads of them: bytes it would drop on
+// hearing them, an address of three bytes say, are a record no host can
+// use, and a name written as a pointer into a message points nowhere
+// in the one the record is said in.
+func rawData(data Raw) (wire.Data, error) {
+	if data.Kind == 0 || data.Kind == TypeANY {
+		return nil, fmt.Errorf("%w: a record of type %d", ErrInvalid, data.Kind)
+	}
+
+	opaque := wire.Opaque{Kind: uint16(data.Kind), Bytes: data.Bytes}
+	alone := wire.NewBuilder(nil, wire.Header{Response: true}, wire.Options{})
+
+	if err := alone.Answer(wire.Record{Name: Name{local}, Class: wire.ClassIN, TTL: 1, Data: opaque}); err != nil {
+		return nil, fmt.Errorf("%w: a record of type %d of %d bytes", ErrInvalid, data.Kind, len(data.Bytes))
+	}
+
+	read, err := wire.Parse(alone.Bytes())
+	if err != nil || len(read.Answers) != 1 {
+		return nil, fmt.Errorf(
+			"%w: what a record of type %d holds is not these %d bytes",
+			ErrInvalid,
+			data.Kind,
+			len(data.Bytes),
+		)
+	}
+
+	if written, err := wire.AppendData(nil, read.Answers[0].Data); err != nil || !slices.Equal(written, data.Bytes) {
+		return nil, fmt.Errorf(
+			"%w: what a record of type %d holds is not written as these %d bytes",
+			ErrInvalid,
+			data.Kind,
+			len(data.Bytes),
+		)
+	}
+
+	return opaque, nil
 }
 
 // wire is a text record as its strings.
