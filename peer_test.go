@@ -346,8 +346,10 @@ func TestAPeerPublishes(t *testing.T) {
 
 // A record that does not say how long it is to be remembered is given
 // what RFC 6762 section 10 recommends: two minutes when its name is a
-// host's or its data holds a host's name, 75 minutes otherwise.
-func TestHowLongARecordIsRememberedByDefault(t *testing.T) {
+// host's or its data holds a host's name, 75 minutes otherwise. One that
+// says is remembered that long, in whole seconds and a second at least:
+// under a second is not "does not say".
+func TestHowLongARecordIsRemembered(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
@@ -385,6 +387,10 @@ func TestHowLongARecordIsRememberedByDefault(t *testing.T) {
 			"an address back to its host":   {mdns.Record{Name: back, Data: mdns.PTR{Target: host}}, 2 * time.Minute},
 			"what lists a service":          {mdns.Record{Name: listed, Data: mdns.PTR{Target: mdns.Name{"a", "_http", "_tcp", "local"}}}, 75 * time.Minute},
 			"what a service says of itself": {mdns.Record{Name: mdns.Name{"b", "_http", "_tcp", "local"}, Data: mdns.TXT{}}, 75 * time.Minute},
+			"said for a minute":             {mdns.Record{Name: mdns.Name{"c", "_http", "_tcp", "local"}, TTL: time.Minute, Data: mdns.TXT{}}, time.Minute},
+			"said for half a second":        {mdns.Record{Name: mdns.Name{"d", "_http", "_tcp", "local"}, TTL: time.Second / 2, Data: mdns.TXT{}}, time.Second},
+			"said for a nanosecond":         {mdns.Record{Name: mdns.Name{"e", "_http", "_tcp", "local"}, TTL: 1, Data: mdns.TXT{}}, time.Second},
+			"said for nearly two seconds":   {mdns.Record{Name: mdns.Name{"f", "_http", "_tcp", "local"}, TTL: 1900 * time.Millisecond, Data: mdns.TXT{}}, time.Second},
 		} {
 			if _, err := one.Publish(t.Context(), mdns.Records{Records: []mdns.Record{row.record}}); err != nil {
 				t.Fatalf("%s: %v", what, err)

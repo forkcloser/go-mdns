@@ -29,7 +29,8 @@ const (
 type Record struct {
 	Name Name
 	// TTL is how long. Published, zero is what RFC 6762 recommends for
-	// the record's type.
+	// the record's type, and any other is said in whole seconds, a
+	// second at least.
 	TTL time.Duration
 	// Data is what is said: one of the types below.
 	Data Data
