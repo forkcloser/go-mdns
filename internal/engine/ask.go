@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -646,33 +645,68 @@ func (e *Engine) overheard(heard *link, arrived arrival) {
 		return
 	}
 
+	// A message is one question of each name and type it asks for,
+	// however often it repeats it, and what it says its asker knows is
+	// read once: what a neighbour's message costs goes by its length and
+	// by what is held of the names it asks for, and by no product of them.
+	theirs := saidIn(arrived.message.Answers)
+	asked := make(map[askKey]struct{}, len(arrived.message.Questions))
+
 	for _, question := range arrived.message.Questions {
 		if question.Unicast || question.Class != wire.ClassIN && question.Class != classANY {
 			continue
 		}
 
 		key := askKey{name: nameKey(question.Name), kind: question.Type}
-		e.asKnown(heard, key, arrived.message.Answers)
-		e.missing(heard, key, arrived.message.Answers)
+		if _, again := asked[key]; again {
+			continue
+		}
+
+		asked[key] = struct{}{}
+
+		e.asKnown(heard, key, theirs)
+		e.missing(heard, key, theirs)
 	}
+}
+
+// said is a record as it is told from another: its name, its type and
+// its data, no name of it compressed.
+type said struct {
+	name string
+	kind uint16
+	data string
+}
+
+// saidIn is the records of a message, each once. One whose data cannot
+// be written is none that anything held could be.
+func saidIn(records []wire.Record) map[said]struct{} {
+	told := make(map[said]struct{}, len(records))
+
+	for _, record := range records {
+		if data, err := wire.AppendData(nil, record.Data); err == nil {
+			told[said{nameKey(record.Name), record.Type(), string(data)}] = struct{}{}
+		}
+	}
+
+	return told
 }
 
 // asKnown counts a question of our own as asked when another host has
 // just asked it, saying to know nothing we would not say we know.
-func (e *Engine) asKnown(heard *link, key askKey, theirs []wire.Record) {
+func (e *Engine) asKnown(heard *link, key askKey, theirs map[said]struct{}) {
 	asked := e.asked[key]
 	if asked == nil || asked.paces[heard] == nil || asked.paces[heard].timer == nil {
 		return
 	}
 
-	ours := e.known(heard, asked.question)
+	ours := saidIn(e.known(heard, asked.question))
 
-	for _, record := range theirs {
-		if nameKey(record.Name) != key.name || key.kind != wire.TypeANY && record.Type() != key.kind {
+	for record := range theirs {
+		if record.name != key.name || key.kind != wire.TypeANY && record.kind != key.kind {
 			continue
 		}
 
-		if !slices.ContainsFunc(ours, func(one wire.Record) bool { return same(one, record) }) {
+		if _, known := ours[record]; !known {
 			return
 		}
 	}
@@ -689,33 +723,32 @@ func (e *Engine) asKnown(heard *link, key askKey, theirs []wire.Record) {
 // question of another host and that the asker does not say it knows,
 // one question it should be answered to. Two of them and ten seconds
 // with no answer, and the record is forgotten.
-func (e *Engine) missing(heard *link, key askKey, theirs []wire.Record) {
-	for _, one := range heard.lookup(key.name, key.kind, e.now) {
-		if slices.ContainsFunc(theirs, func(record wire.Record) bool { return same(one.record, record) }) {
+func (e *Engine) missing(heard *link, key askKey, theirs map[said]struct{}) {
+	for kind, held := range heard.cache[key.name] {
+		if key.kind != wire.TypeANY && key.kind != kind {
 			continue
 		}
 
-		if one.missed == 0 || e.now.Sub(one.since) > doubt {
-			one.missed, one.since = 0, e.now
-		}
+		for _, one := range held {
+			if _, known := theirs[said{key.name, kind, string(one.raw)}]; known || !one.alive(e.now) {
+				continue
+			}
 
-		one.missed++
-
-		if one.missed >= unanswered {
-			e.soon(one.since.Add(doubt))
+			if one.passedOver(e.now) {
+				e.soon(one.since.Add(doubt))
+			}
 		}
 	}
 }
 
-// same says whether two records are one: the name, the type and the
-// data.
-func same(one, other wire.Record) bool {
-	if one.Type() != other.Type() || nameKey(one.Name) != nameKey(other.Name) {
-		return false
+// passedOver counts one question the record should have been answered
+// to and was not, and says whether that makes enough of them.
+func (one *entry) passedOver(now time.Time) bool {
+	if one.missed == 0 || now.Sub(one.since) > doubt {
+		one.missed, one.since = 0, now
 	}
 
-	mine, err := wire.AppendData(nil, one.Data)
-	theirs, other2 := wire.AppendData(nil, other.Data)
+	one.missed++
 
-	return err == nil && other2 == nil && bytes.Equal(mine, theirs)
+	return one.missed >= unanswered
 }

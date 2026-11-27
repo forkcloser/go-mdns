@@ -451,6 +451,35 @@ func TestQuestionsUnansweredFarApart(t *testing.T) {
 	})
 }
 
+// Section 10.5 counts "two or more of these queries": a message that
+// holds the question twice is one of them, and the record stays.
+func TestAQuestionTwiceInAMessageIsOneQuestion(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		other := join(t, &network, port("en0", lan, 2))
+		asking := ask(t, open(t, engine.Config{Network: network.Host(port("en0", lan, 1))}), browse())
+		question := wire.Question{Name: typeName(), Type: wire.TypePTR, Class: wire.ClassIN}
+
+		other.answer(t, "en0", pointer("Kitchen", 4500))
+		asking.next(t, engine.Found)
+
+		twice := wire.NewBuilder(nil, asks(), wire.Options{})
+		if err := errors.Join(twice.Question(question), twice.Question(question)); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := other.link(t, "en0").Multicast(twice.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+
+		time.Sleep(11 * time.Second)
+		asking.nothing(t)
+	})
+}
+
 // A neighbour cannot make a host remember without end: past 4096
 // records on a link, only what is asked about is kept; and what runs
 // out makes room again.
