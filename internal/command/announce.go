@@ -165,7 +165,7 @@ func (a *announcing) start(ctx context.Context, one asked) error {
 			Name:  announced.Name(),
 			Asked: one.service.Name,
 			Type:  one.service.Type,
-			Host:  a.peer.Hostname(),
+			Host:  a.host(&one.service),
 		},
 	)
 
@@ -186,6 +186,22 @@ func (a *announcing) start(ctx context.Context, one asked) error {
 	})
 
 	return nil
+}
+
+// host is the host a service is announced on, as it is said: this one,
+// or the one the service says it is on, under "local" as this one is.
+func (a *announcing) host(service *mdns.Service) string {
+	if service.Host == "" {
+		return a.peer.Hostname()
+	}
+
+	// A name, or the service would not have been announced.
+	name, _ := mdns.ParseName(service.Host)
+	if len(name) == 0 || !strings.EqualFold(name[len(name)-1], "local") {
+		name = append(name, "local")
+	}
+
+	return name.String()
 }
 
 // numbered is the name to take in place of one that is taken, as RFC

@@ -262,7 +262,7 @@ func TestADocumentIsAnnounced(t *testing.T) {
 				"name":  "Garden camera",
 				"asked": "Garden camera",
 				"type":  "_http._tcp",
-				"host":  "kitchen.local",
+				"host":  "garden-camera.local",
 			},
 		}
 
