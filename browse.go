@@ -23,7 +23,8 @@ type Query struct {
 
 	// Name narrows it to the one instance of that name. Its records are
 	// then asked for directly, which finds it sooner than browsing for
-	// its type does.
+	// its type does; but for Unresolved, which asks for no record of an
+	// instance, and finds this one when its type lists it.
 	Name string
 
 	// Unresolved tells of instances as soon as their names are known,
