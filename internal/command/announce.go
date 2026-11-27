@@ -43,7 +43,7 @@ func announceAll(ctx context.Context, env *Environment, args []string) error {
 		return err
 	}
 
-	want, err := from.load(env)
+	want, err := from.load(ctx, env)
 	if err != nil {
 		return err
 	}
