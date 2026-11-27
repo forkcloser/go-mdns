@@ -79,6 +79,62 @@ type claim struct {
 	// refused is how many names were refused before this one.
 	refused   int
 	published *engine.Publication
+	// replaced is closed once the name, lost to another host, has been
+	// replaced: by the next, or by none.
+	replaced chan struct{}
+}
+
+// during is a context that ends with ctx, and when the name is lost. A
+// service that is on no host of this Peer's has none to lose.
+func (c *claim) during(ctx context.Context) (context.Context, context.CancelFunc) {
+	held, stop := context.WithCancel(ctx)
+
+	if c != nil {
+		go func() {
+			select {
+			case <-c.published.Done():
+				stop()
+			case <-held.Done():
+			}
+		}()
+	}
+
+	return held, stop
+}
+
+// settled is the name the host holds, once it holds one: a name lost to
+// another host is waited out, until the next is held or none is to be
+// had.
+func (p *Peer) settled(ctx context.Context) (*claim, error) {
+	for {
+		p.mu.Lock()
+		held := p.held
+		p.mu.Unlock()
+
+		if held == nil {
+			return nil, fmt.Errorf("%w: the host has no name", ErrConflict)
+		}
+
+		select {
+		case <-held.published.Done():
+		default:
+			return held, nil
+		}
+
+		if !errors.Is(held.published.Err(), engine.ErrConflict) {
+			return nil, ErrClosed
+		}
+
+		// A Peer that closes while its host asks for another name leaves
+		// the lost one as it is.
+		select {
+		case <-held.replaced:
+		case <-p.life.Done():
+			return nil, ErrClosed
+		case <-ctx.Done():
+			return nil, fmt.Errorf("waiting for the host's next name: %w", context.Cause(ctx))
+		}
+	}
 }
 
 // host is the name the host holds, claimed now if it was not yet: asked
@@ -115,7 +171,7 @@ func (p *Peer) claim(ctx context.Context, label string, refused int) (*claim, er
 	for tries := refused + 1; ; tries++ {
 		published, err := p.engine.Publish(ctx, engine.Set{Host: []string{label, local}, Addresses: p.addresses})
 		if err == nil {
-			return &claim{label: label, refused: tries - 1, published: published}, nil
+			return &claim{label: label, refused: tries - 1, published: published, replaced: make(chan struct{})}, nil
 		}
 
 		if !errors.Is(err, engine.ErrConflict) {
@@ -142,12 +198,22 @@ func (p *Peer) keepHost(held *claim) {
 			return
 		}
 
-		held = p.reclaim(held)
+		lost := held
+
+		var closing bool
+
+		// A Peer that closes while its host asks for another name has
+		// lost none: its services end as closed, each by its keeper.
+		if held, closing = p.reclaim(lost); closing {
+			return
+		}
 
 		p.mu.Lock()
 		p.held = held
 		announced := slices.Clone(p.announced)
 		p.mu.Unlock()
+
+		close(lost.replaced)
 
 		for _, service := range announced {
 			switch {
@@ -166,11 +232,12 @@ func (p *Peer) keepHost(held *claim) {
 }
 
 // reclaim holds the host under the name Rename gives for one that was
-// lost; and holds nothing when it gives none, or the Peer is closing.
-func (p *Peer) reclaim(lost *claim) *claim {
+// lost; and holds nothing when it gives none, or the Peer is closing,
+// which it says.
+func (p *Peer) reclaim(lost *claim) (held *claim, closing bool) {
 	next, ok := rename(p.rename, lost.label, lost.refused+1, true)
 	if !ok {
-		return nil
+		return nil, false
 	}
 
 	p.claiming.Lock()
@@ -178,10 +245,10 @@ func (p *Peer) reclaim(lost *claim) *claim {
 
 	held, err := p.claim(p.life, next, lost.refused+1)
 	if err != nil {
-		return nil
+		return nil, !errors.Is(err, ErrConflict)
 	}
 
-	return held
+	return held, false
 }
 
 // elsewhere is a host that is not this one, announced on its behalf.
