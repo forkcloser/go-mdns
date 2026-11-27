@@ -256,6 +256,8 @@ func (l *link) matching(question wire.Question) []*owned {
 		held    bool
 	)
 
+	l.asked++
+
 	for _, stood := range l.standing {
 		if !stood.live {
 			continue
@@ -268,7 +270,7 @@ func (l *link) matching(question wire.Question) []*owned {
 
 			held = held || record.unique()
 
-			if question.Type == wire.TypeANY || question.Type == record.record.Type() {
+			if record.answers(question.Type) && record.first(l.asked) {
 				matched = append(matched, record)
 			}
 		}
@@ -545,6 +547,8 @@ func (l *link) write(records []*owned, goodbye bool, send func([]byte)) {
 	message := fresh()
 
 	for _, record := range records {
+		record.given = !goodbye
+
 		said := record.record
 		if goodbye {
 			said.TTL, said.Flush = 0, false
@@ -570,15 +574,21 @@ func (l *link) write(records []*owned, goodbye bool, send func([]byte)) {
 		return
 	}
 
-	// What goes with them, as far as there is room: it is asked for
-	// when it is not there.
 	if !goodbye {
-		for _, record := range l.additional(records) {
-			_ = message.Additional(record.record)
-		}
+		l.accompany(message, records)
 	}
 
 	send(message.Bytes())
+}
+
+// accompany adds to a message what goes with its answers, as far as
+// there is room: it is asked for when it is not there.
+func (l *link) accompany(message *wire.Builder, answers []*owned) {
+	for _, record := range l.additional(answers) {
+		if message.Additional(record.record) == nil {
+			record.given = true
+		}
+	}
 }
 
 // alone sends a record that fits no message of the link's in one of its
