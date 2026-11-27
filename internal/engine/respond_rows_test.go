@@ -418,3 +418,155 @@ func TestAQuestionRepeatedIsAnsweredOnce(t *testing.T) {
 		})
 	}
 }
+
+// RFC 6762 section 10.2: "Any time a host sends a response packet
+// containing some members of a unique RRSet, it MUST send the entire
+// RRSet". An asker that knows one of a name's two addresses is told
+// both, each to be this host's alone; one that knows both is told
+// nothing (section 7.1). Records others may say too are left out one by
+// one: there is no set of them to say whole.
+func TestASetThatIsThisHostsAloneIsSaidWhole(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		other := join(t, &network, port("en0", lan, 2))
+		host := open(t, engine.Config{Network: network.Host(port("en0", lan, 1))})
+
+		settled(t, host, other, engine.Set{Records: []wire.Record{
+			address(1, true), address(3, true), pointer("Kitchen", 4500), pointer("Garden", 4500),
+		}})
+
+		// told is what the neighbour hears in answer, as its data and
+		// whether it is said to be this host's alone.
+		told := func(question wire.Question, known ...wire.Record) map[string]bool {
+			time.Sleep(time.Minute)
+			other.drain()
+			other.ask(t, question, known...)
+			time.Sleep(time.Second)
+			synctest.Wait()
+
+			answers := map[string]bool{}
+
+			for len(other.heard) > 0 {
+				for _, answer := range (<-other.heard).Answers {
+					answers[fmt.Sprint(answer.Data)] = answer.Flush
+				}
+			}
+
+			return answers
+		}
+
+		both := map[string]bool{fmt.Sprint(address(1, true).Data): true, fmt.Sprint(address(3, true).Data): true}
+
+		if got := told(query(hostName(), wire.TypeA), address(1, false)); !reflect.DeepEqual(got, both) {
+			t.Errorf("an asker that knows one address of two is told %v; want both, each this host's alone", got)
+		}
+
+		if got := told(query(hostName(), wire.TypeA), address(1, false), address(3, false)); len(got) != 0 {
+			t.Errorf("an asker that knows both addresses is told %v; want nothing", got)
+		}
+
+		garden := map[string]bool{fmt.Sprint(pointer("Garden", 4500).Data): false}
+
+		if got := told(query(typeName(), wire.TypePTR), pointer("Kitchen", 4500)); !reflect.DeepEqual(got, garden) {
+			t.Errorf("an asker that knows one instance of two is told %v; want the other alone", got)
+		}
+	})
+}
+
+// Section 7.2: what an asker knows may come in more than one message,
+// after a question cut short. The set is weighed against all of it: an
+// asker that says in its second message that it knows the address it
+// did not name in its first knows both, and is told nothing; one that
+// knows one address in all, said first or after, is told both.
+func TestASetIsWeighedAgainstAllItsAskerKnows(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var network mdnstest.Network
+
+		other := join(t, &network, port("en0", lan, 2))
+		host := open(t, engine.Config{Network: network.Host(port("en0", lan, 1))})
+
+		settled(t, host, other, engine.Set{Records: []wire.Record{address(1, true), address(3, true)}})
+
+		// A set of another name, held along with the first when both are
+		// asked for in one message.
+		garden := wire.Record{
+			Name: []string{"garden", "local"}, Class: wire.ClassIN, TTL: 120, Flush: true,
+			Data: wire.Address{Addr: netip.AddrFrom4([4]byte{192, 0, 2, 5})},
+		}
+
+		settled(t, host, other, engine.Set{Records: []wire.Record{garden}})
+
+		say := func(header wire.Header, questions []wire.Question, known ...wire.Record) {
+			for _, message := range messages(t, header, questions, known...) {
+				if err := other.link(t, "en0").Multicast(message); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+
+		// told is what the neighbour hears in answer to a question cut
+		// short, knowing some addresses then, and others in the message
+		// that follows.
+		told := func(names [][]string, first, then []wire.Record) map[string]bool {
+			var questions []wire.Question
+
+			for _, name := range names {
+				questions = append(questions, query(name, wire.TypeA))
+			}
+
+			time.Sleep(time.Minute)
+			other.drain()
+			say(wire.Header{Truncated: true}, questions, first...)
+			time.Sleep(100 * time.Millisecond)
+			say(asks(), nil, then...)
+			time.Sleep(time.Second)
+			synctest.Wait()
+
+			answers := map[string]bool{}
+
+			for len(other.heard) > 0 {
+				for _, answer := range (<-other.heard).Answers {
+					answers[fmt.Sprint(answer.Data)] = answer.Flush
+				}
+			}
+
+			return answers
+		}
+
+		one, three := address(1, false), address(3, false)
+		both := map[string]bool{fmt.Sprint(one.Data): true, fmt.Sprint(three.Data): true}
+
+		for what, row := range map[string]struct {
+			first, then []wire.Record
+			want        map[string]bool
+		}{
+			"one, then the other": {first: []wire.Record{one}, then: []wire.Record{three}, want: map[string]bool{}},
+			"none, then both":     {then: []wire.Record{one, three}, want: map[string]bool{}},
+			"none, then one":      {then: []wire.Record{one}, want: both},
+			"one, then no other":  {first: []wire.Record{one}, then: []wire.Record{pointer("Kitchen", 4500)}, want: both},
+		} {
+			if got := told([][]string{hostName()}, row.first, row.then); !reflect.DeepEqual(got, row.want) {
+				t.Errorf("an asker that knows %s is told %v; want %v", what, got, row.want)
+			}
+		}
+
+		// Two names asked for at once: a set is the records of one.
+		alone := map[string]bool{fmt.Sprint(garden.Data): true}
+
+		if got := told(
+			[][]string{hostName(), garden.Name},
+			[]wire.Record{one},
+			[]wire.Record{three},
+		); !reflect.DeepEqual(
+			got,
+			alone,
+		) {
+			t.Errorf("an asker that knows all of one name and nothing of another is told %v; want %v", got, alone)
+		}
+	})
+}
