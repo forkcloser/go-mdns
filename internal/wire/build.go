@@ -200,7 +200,8 @@ func (b *Builder) add(section int, write func(*writer) error) error {
 	}
 
 	if err != nil {
-		b.out.buf, b.out.seen = b.out.buf[:size], b.out.seen[:seen]
+		b.out.buf = b.out.buf[:size]
+		b.out.forget(seen)
 
 		return err
 	}
@@ -232,9 +233,11 @@ type writer struct {
 	// start is where the message begins in buf: what a pointer counts
 	// from.
 	start int
-	// seen is where each label written begins, for those a pointer can
-	// reach.
-	seen []int
+	// at is where the end of a name was first written, for those a
+	// pointer can reach, by the digest of its labels, and seen those
+	// digests in the order they were written.
+	at   map[uint64]uint16
+	seen []uint64
 }
 
 func (w *writer) u8(value byte)    { w.buf = append(w.buf, value) }
@@ -248,19 +251,33 @@ func (w *writer) name(labels []string, compress bool) error {
 		return err
 	}
 
+	// The digest of each end of the name, the shortest first: one pass
+	// over the name, where looking for each end among all those written
+	// was the names written times the labels of this one, squared when
+	// they share a long end.
+	var ends [maxName/2 + 1]uint64
+
+	digest := uint64(digestBasis)
+
+	for index, label := range slices.Backward(labels) {
+		digest = (digest ^ uint64(len(label))) * digestPrime
+
+		for _, char := range []byte(label) {
+			digest = (digest ^ uint64(char)) * digestPrime
+		}
+
+		ends[index] = digest
+	}
+
 	for index, label := range labels {
-		if compress {
-			if at, found := w.find(labels[index:]); found {
-				w.u16(pointerBits | at)
+		// Two ends may share a digest: the labels decide.
+		if at, found := w.at[ends[index]]; compress && found && w.same(int(at), labels[index:]) {
+			w.u16(pointerBits | at)
 
-				return nil
-			}
+			return nil
 		}
 
-		if at := len(w.buf) - w.start; at <= maxPointer {
-			w.seen = append(w.seen, at)
-		}
-
+		w.note(ends[index])
 		w.u8(byte(len(label))) // #nosec G115 -- at most maxLabel, by checkName
 		w.buf = append(w.buf, label...)
 	}
@@ -270,15 +287,37 @@ func (w *writer) name(labels []string, compress bool) error {
 	return nil
 }
 
-// find is where labels were written before, as the whole end of a name.
-func (w *writer) find(labels []string) (uint16, bool) {
-	for _, at := range w.seen {
-		if w.same(at, labels) {
-			return uint16(at), true // #nosec G115 -- at most maxPointer, as seen holds nothing else
-		}
+// The 64-bit FNV-1a digest's constants.
+const (
+	digestBasis = 14695981039346656037
+	digestPrime = 1099511628211
+)
+
+// note remembers that the end of a name with this digest begins here,
+// when a pointer can reach it and none is remembered: the first place a
+// name was written is the one pointed to.
+func (w *writer) note(digest uint64) {
+	offset := len(w.buf) - w.start
+	if _, held := w.at[digest]; held || offset > maxPointer {
+		return
 	}
 
-	return 0, false
+	if w.at == nil {
+		w.at = map[uint64]uint16{}
+	}
+
+	w.at[digest] = uint16(offset) // #nosec G115 -- at most maxPointer
+	w.seen = append(w.seen, digest)
+}
+
+// forget takes back what was noted after the first kept: the names of a
+// record that was not written.
+func (w *writer) forget(kept int) {
+	for _, digest := range w.seen[kept:] {
+		delete(w.at, digest)
+	}
+
+	w.seen = w.seen[:kept]
 }
 
 // same says whether the name written at a place is these labels, to its
