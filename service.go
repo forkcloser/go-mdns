@@ -55,8 +55,9 @@ type Service struct {
 	// behalf: the name of the host it is on, and the addresses that
 	// host is at, which need be none of this host's. Both, or neither:
 	// empty is this host, at its own addresses on each link. The name
-	// is claimed as this host's own is, and the addresses are said as
-	// they are given, on every interface the service is announced on.
+	// is text as this host's own is, of one label or more under
+	// "local", and is claimed as it; the addresses are said as they are
+	// given, on every interface the service is announced on.
 	Host  string
 	Addrs []netip.Addr
 
@@ -124,7 +125,7 @@ func (s *Service) elsewhere() error {
 	}
 
 	if s.Host != "" {
-		if _, err := hostName(s.Host); err != nil {
+		if _, err := announcedHost(s.Host); err != nil {
 			return err
 		}
 	}
@@ -201,6 +202,24 @@ func foundHost(written string) (Name, error) {
 
 	if len(name) == 1 {
 		name = append(name, local)
+	}
+
+	return name, nil
+}
+
+// announcedHost is hostName for a host this Peer announces, its own or
+// one it speaks for: its labels are held to text, as an instance's name
+// is.
+func announcedHost(written string) (Name, error) {
+	name, err := hostName(written)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, label := range name {
+		if err = text(label); err != nil {
+			return nil, err
+		}
 	}
 
 	return name, nil
